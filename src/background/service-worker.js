@@ -1,0 +1,242 @@
+// 后台 service worker：侧边栏行为、右键菜单（快捷动作组动态生成）、pendingTask 中转。
+// 不做网络请求——流式 fetch 与页面功能编排全在面板/聊天页上下文里执行，规避 MV3 SW 30 秒回收。
+
+import { loadSettings, DEFAULT_QUICK_ACTIONS } from '../llm/store.js';
+
+const MENU_ROOT = 'om-root';
+const MENU_CHAT_TAB = 'om-chat-tab';
+const MENU_TRANSLATE = 'om-translate-page';
+const menuActionId = (actionId) => `om-qa:${actionId}`;
+
+async function rebuildMenus() {
+  await chrome.contextMenus.removeAll();
+  chrome.contextMenus.create(
+    { id: MENU_ROOT, title: 'Vela', contexts: ['selection', 'page'] },
+    () => void chrome.runtime.lastError,
+  );
+  chrome.contextMenus.create(
+    { id: MENU_CHAT_TAB, parentId: MENU_ROOT, title: '打开独立聊天页', contexts: ['selection', 'page'] },
+    () => void chrome.runtime.lastError,
+  );
+  chrome.contextMenus.create(
+    { id: MENU_TRANSLATE, parentId: MENU_ROOT, title: '翻译此网页', contexts: ['page'] },
+    () => void chrome.runtime.lastError,
+  );
+  chrome.contextMenus.create(
+    { id: 'om-qa-sep', parentId: MENU_ROOT, type: 'separator', contexts: ['selection'] },
+    () => void chrome.runtime.lastError,
+  );
+  const { quickActions } = await loadSettings();
+  for (const qa of quickActions) {
+    chrome.contextMenus.create(
+      { id: menuActionId(qa.id), parentId: MENU_ROOT, title: qa.title, contexts: ['selection'] },
+      () => void chrome.runtime.lastError,
+    );
+  }
+}
+
+// 页面常驻浮窗 + 划词工具条：persistAcrossSessions 的注册在扩展重载后仍存活，Chrome 会继续用
+// 缓存的旧脚本内容注入（改了脚本不重新注册的话，页面刷新拿到的还是旧代码，
+// 表现为改完 logo/文案后浮窗一直不变）。每次 onInstalled 都 updateContentScripts
+// 强制按当前磁盘文件重读；id 不存在时回落注册。
+const WIDGET_SCRIPT = {
+  id: 'om-widget',
+  matches: ['http://*/*', 'https://*/*'],
+  js: ['src/content/widget.js', 'src/content/selection-popup.js'],
+  runAt: 'document_idle',
+  persistAcrossSessions: true,
+};
+async function ensureWidgetRegistered() {
+  try {
+    const registered = await chrome.scripting.getRegisteredContentScripts();
+    if (registered.some((s) => s.id === 'om-widget')) {
+      await chrome.scripting.updateContentScripts([WIDGET_SCRIPT]);
+      return;
+    }
+    await chrome.scripting.registerContentScripts([WIDGET_SCRIPT]);
+  } catch (e) {
+    console.error('浮窗注册失败:', e);
+  }
+}
+
+// 安装/更新时向已打开的 http(s) 标签页补注浮窗（注册式注入只对之后加载的页面生效）
+async function backfillWidgetTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+    await Promise.allSettled(
+      tabs
+        .filter((t) => t.id != null && !t.discarded)
+        .map((t) => chrome.scripting.executeScript({
+          target: { tabId: t.id },
+          files: ['src/content/widget.js', 'src/content/selection-popup.js'],
+        })),
+    );
+  } catch (e) {
+    console.error('浮窗补注失败:', e);
+  }
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  // 工具栏图标 / Ctrl+M 不开原生侧边栏：原生面板窗口级常驻、跟随新标签页出现且无关闭 API。
+  // 图标动作改由 action.onClicked 开关当前标签页的页内聊天卡；原生面板只能从
+  // Chrome 自带的侧边栏下拉显式打开（不再设扩展自己的入口）。
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: false })
+    .catch((e) => console.error('setPanelBehavior 失败:', e));
+  await rebuildMenus();
+  await ensureWidgetRegistered();
+  await backfillWidgetTabs();
+});
+
+// 顶层聊天界面（原生侧边栏 / 独立聊天页）可见时广播：收起各页面浮窗的聊天卡，
+// 避免侧边栏与聊天卡并存（原生侧边栏没有关闭 API，只能反向收卡）
+async function closeCardsInAllTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+    await Promise.allSettled(tabs.map((t) => chrome.tabs.sendMessage(t.id, { type: 'om:close-card' })));
+  } catch { /* 标签查询失败忽略 */ }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'om:refresh-menus') {
+    rebuildMenus();
+    return;
+  }
+  if (msg?.type === 'om:panel-visible') {
+    closeCardsInAllTabs();
+    return;
+  }
+  if (msg?.type === 'om:open-options') {
+    chrome.runtime.openOptionsPage().catch(() => {});
+    return;
+  }
+  if (msg?.type === 'om:capture-visible-tab') {
+    // 高亮像素终验用：内容脚本无截屏权限，由 SW 截来源窗口的可见标签页回传 dataUrl。
+    // host_permissions <all_urls> 已覆盖 captureVisibleTab 所需授权
+    chrome.tabs.captureVisibleTab(sender?.tab?.windowId, { format: 'png' }, (dataUrl) => {
+      sendResponse(chrome.runtime.lastError ? { ok: false } : { ok: true, dataUrl });
+    });
+    return true; // 异步 sendResponse
+  }
+  if (msg?.type === 'om:widget-action') {
+    handleWidgetAction(msg, sender.tab)
+      .then((res) => sendResponse(res ?? { ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true; // 异步 sendResponse
+  }
+});
+
+async function resolveQuickAction(actionId) {
+  const { quickActions } = await loadSettings();
+  return quickActions.find((a) => a.id === actionId)
+    ?? DEFAULT_QUICK_ACTIONS.find((a) => a.id === actionId);
+}
+
+// 浮窗动作 → 后台只写 pendingTask，LLM 由浮窗自行打开的页内聊天卡执行。
+// 划词工具条（from: 'sel-popup'）没有本地开卡能力：写完任务后由后台回开聊天卡。
+// ask 默认「快速提问」预填输入框；面板追问带 autoSend 直接发送。
+async function handleWidgetAction(msg, tab) {
+  const ts = Date.now();
+  if (msg.kind === 'page-summary' || msg.kind === 'translate-page') {
+    await chrome.storage.session.set({ pendingTask: { kind: msg.kind, tabId: tab?.id ?? null, ts } });
+    return { ok: true };
+  }
+  if (msg.kind === 'ask') {
+    if (msg.from === 'sel-popup' && tab) await openChatInTab(tab);
+    await chrome.storage.session.set({
+      pendingTask: {
+        kind: 'ask',
+        title: '快速提问',
+        prompt: (msg.selection || '').slice(0, 8000),
+        sourceUrl: tab?.url || '',
+        autoSend: msg.autoSend === true,
+        ts,
+      },
+    });
+    return { ok: true };
+  }
+  if (msg.kind === 'quick-action') {
+    const qa = await resolveQuickAction(msg.actionId);
+    if (!qa) return { ok: false };
+    const selection = (msg.selection || '').slice(0, 8000);
+    const prompt = qa.prompt.includes('{text}') ? qa.prompt.replace('{text}', selection) : `${qa.prompt}\n\n${selection}`;
+    if (msg.from === 'sel-popup' && tab) await openChatInTab(tab);
+    await chrome.storage.session.set({
+      pendingTask: { kind: 'quick-action', actionId: msg.actionId, title: qa.title, prompt, sourceUrl: tab?.url || '', ts },
+    });
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
+// 向标签页浮窗发消息；无应答时先就地补注浮窗再试一次
+//（扩展重载后旧页面浮窗上下文失效的常见场景，浮窗脚本自带失效自检重铺）。
+// 返回 true 表示送达；页面不可注入（chrome:// 页等）返回 false。
+async function messageWidget(tab, msg) {
+  if (tab?.id == null) return false;
+  try {
+    await chrome.tabs.sendMessage(tab.id, msg);
+    return true;
+  } catch { /* 本页浮窗不可用 → 补注后重试 */ }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/widget.js'] });
+    await chrome.tabs.sendMessage(tab.id, msg);
+    return true;
+  } catch { /* 页面不可注入 */ return false; }
+}
+
+// 在动作来源标签页展开页内聊天卡（Monica 式：聊天窗按标签页隔离，新标签页不出现）。
+// 聊天卡与原生面板同为 sidepanel.html，pendingTask 的挂载消费与 onChanged 实时消费都能接住。
+// 页面不可注入时开独立聊天页兜底。绝不开原生侧边栏：原生面板窗口级常驻、无关闭 API。
+async function openChatInTab(tab) {
+  if (await messageWidget(tab, { type: 'om:open-card' })) return 'card';
+  await chrome.tabs.create({ url: chrome.runtime.getURL('src/chatpage/chat.html') });
+  return 'tab';
+}
+
+// 工具栏图标 / Ctrl+M（_execute_action）：开关当前标签页的页内聊天卡；
+// 无浮窗页面（chrome:// 新标签页等）回落独立聊天页标签。
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!(await messageWidget(tab, { type: 'om:toggle-card' }))) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('src/chatpage/chat.html') });
+  }
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === MENU_CHAT_TAB) {
+    chrome.tabs.create({ url: chrome.runtime.getURL('src/chatpage/chat.html') });
+    return;
+  }
+  if (info.menuItemId === MENU_TRANSLATE) {
+    await openChatInTab(tab); // 先开聊天界面再写任务，界面加载后经 onChanged 消费
+    await chrome.storage.session.set({
+      pendingTask: { kind: 'translate-page', tabId: tab?.id ?? null, ts: Date.now() },
+    });
+    return;
+  }
+  if (typeof info.menuItemId === 'string' && info.menuItemId.startsWith('om-qa:')) {
+    const actionId = info.menuItemId.slice(6);
+    const qa = await resolveQuickAction(actionId);
+    if (!qa) return;
+    const selection = (info.selectionText || '').slice(0, 2000);
+    const prompt = qa.prompt.includes('{text}') ? qa.prompt.replace('{text}', selection) : `${qa.prompt}\n\n${selection}`;
+    await openChatInTab(tab);
+    await chrome.storage.session.set({
+      pendingTask: {
+        kind: 'quick-action',
+        actionId,
+        title: qa.title,
+        prompt,
+        sourceUrl: tab?.url || '',
+        ts: Date.now(),
+      },
+    });
+  }
+});
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'open-chat-tab') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('src/chatpage/chat.html') });
+  }
+  // _execute_action（Ctrl+M）与工具栏图标同走 action.onClicked：开关本页聊天卡
+});

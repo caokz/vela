@@ -1,0 +1,97 @@
+/* 设计 token：色值/圆角/间距/字号参照本机 Monica 侧边栏实测规格（CDP 计算样式采样），
+   CSS 全部原创。亮色一套定义在 :root，暗色经 prefers-color-scheme 覆盖。 */
+
+:root {
+  /* 声明 color-scheme：让原生控件（select 弹层/滚动条）跟随主题，暗色下不再是白底 */
+  color-scheme: light;
+
+  /* 品牌 */
+  --om-brand: #6841ea;
+  --om-brand-hover: #5b34d6;
+  --om-brand-active: #4f2bc4;
+  --om-brand-weak: rgba(104, 65, 234, 0.08);
+  --om-brand-weak-2: rgba(104, 65, 234, 0.16);
+  --om-on-brand: #ffffff;
+
+  /* 表面 */
+  --om-bg: #ffffff;
+  --om-surface: #f5f5f5;
+  --om-surface-2: #fafafa;
+  --om-hover: rgba(38, 38, 38, 0.05);
+  --om-border: rgba(79, 89, 102, 0.12);
+  --om-border-strong: rgba(79, 89, 102, 0.24);
+
+  /* 文字 */
+  --om-text: #262626;
+  --om-text-2: #868692;
+  --om-text-3: #b4b4be;
+  --om-link: #6841ea;
+
+  /* 状态 */
+  --om-err-bg: #fdecec;
+  --om-err-fg: #d93025;
+  --om-ok-fg: #1a9c6b;
+
+  /* 尺寸 */
+  --om-sidebar-w: 248px;
+  --om-content-max: 720px;
+  --om-topbar-h: 48px;
+
+  /* 间距 */
+  --om-sp-1: 4px;
+  --om-sp-2: 8px;
+  --om-sp-3: 12px;
+  --om-sp-4: 16px;
+  --om-sp-5: 20px;
+  --om-sp-6: 24px;
+
+  /* 圆角 */
+  --om-radius-sm: 6px;
+  --om-radius-md: 12px;
+  --om-radius-lg: 16px;
+  --om-radius-full: 999px;
+
+  /* 字体 */
+  --om-font: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --om-mono: Consolas, "Courier New", monospace;
+  --om-fs-xs: 12px;
+  --om-fs-sm: 13px;
+  --om-fs-md: 14px;
+  --om-fs-lg: 16px;
+  --om-fs-xl: 20px;
+
+  --om-shadow: 0 4px 16px rgba(38, 38, 38, 0.08);
+  --om-shadow-pop: 0 8px 32px rgba(38, 38, 38, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --om-brand: #9880f8;
+    --om-brand-hover: #a795fa;
+    --om-brand-active: #b3a4fb;
+    --om-brand-weak: rgba(152, 128, 248, 0.12);
+    --om-brand-weak-2: rgba(152, 128, 248, 0.22);
+    --om-on-brand: #17131f;
+
+    --om-bg: #202020;
+    --om-surface: #2d2d2f;
+    --om-surface-2: #29292b;
+    --om-hover: rgba(243, 243, 243, 0.06);
+    --om-border: rgba(86, 86, 95, 0.32);
+    --om-border-strong: rgba(86, 86, 95, 0.55);
+
+    --om-text: #f3f3f3;
+    --om-text-2: #77777e;
+    --om-text-3: #5c5c63;
+    --om-link: #9880f8;
+
+    --om-err-bg: rgba(217, 48, 37, 0.16);
+    --om-err-fg: #ff8182;
+    --om-ok-fg: #4cc590;
+
+    --om-shadow: 0 4px 16px rgba(0, 0, 0, 0.32);
+    --om-shadow-pop: 0 8px 32px rgba(0, 0, 0, 0.48);
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+dev-key.pem
+*.log
+bridge/node_modules/

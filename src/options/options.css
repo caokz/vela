@@ -1,0 +1,85 @@
+/* 设置页样式：色板消费 tokens.css（页面已 <link>），布局自有。 */
+:root {
+  --bg: var(--om-surface-2);
+  --card: var(--om-bg);
+  --fg: var(--om-text);
+  --muted: var(--om-text-2);
+  --border: var(--om-border);
+  --accent: var(--om-brand);
+  --danger: var(--om-err-fg);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto;
+  max-width: 720px;
+  padding: 24px 16px 64px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+h1 { font-size: 22px; }
+h2 { font-size: 16px; margin-top: 32px; }
+.card h3 { font-size: 14px; margin: 2px 0 4px; }
+.hint { color: var(--muted); font-size: 13px; }
+code { background: var(--border); border-radius: 4px; padding: 1px 5px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+label { display: block; margin: 8px 0; flex: 1; }
+.row { display: flex; gap: 12px; }
+.grow { flex: 1; }
+.p-default-line { flex: none; display: flex; align-items: center; gap: 4px; }
+input, select, textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  background: var(--card);
+  color: var(--fg);
+}
+.p-default-line input[type="radio"] { width: auto; }
+button {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 18px;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+}
+button.secondary { background: var(--border); color: var(--fg); }
+button.danger { background: none; border: 1px solid var(--danger); color: var(--danger); }
+button:disabled { opacity: 0.5; cursor: default; }
+.agent-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.agent-actions button { min-width: 104px; }
+.agent-actions .om-agent-conn { flex: none; white-space: nowrap; }
+.agent-actions #om-agent-result { flex: 1 1 240px; min-width: 200px; }
+.actions { align-items: center; }
+.p-test-result { flex: 1; }
+.provider.active { border-color: var(--accent); }
+/* 网页翻译整卡：供应商列表 + 全局参数 + 翻译参数 同一张卡，小节横线分隔 */
+#om-llm-card > h3 { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+#om-llm-card > #om-providers + #om-add { margin-top: 4px; }
+#om-llm-card .provider { background: var(--bg); }
+#om-save { margin-top: 16px; padding: 10px 28px; }
+.status { margin-top: 10px; min-height: 22px; }
+.status.ok { color: var(--om-ok-fg); }
+.status.err { color: var(--danger); }
+.om-agent-conn.om-conn-on { color: var(--om-ok-fg); }
+
+/* 快捷动作编辑器 */
+.qa-row {
+  display: grid;
+  grid-template-columns: 150px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+.qa-del { padding: 6px 10px; }
+details summary { cursor: pointer; margin: 6px 0; }

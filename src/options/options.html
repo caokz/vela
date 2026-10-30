@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Vela 设置</title>
+  <link rel="stylesheet" href="../styles/tokens.css" />
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <h1>Vela 设置</h1>
+
+  <h2>本地 Agent（聊天）</h2>
+  <div class="card">
+    <div class="row">
+      <label class="grow">Bridge 地址 <input id="om-agent-url" type="text" placeholder="ws://127.0.0.1:39217" /></label>
+    </div>
+    <div class="row">
+      <label>默认 agent
+        <select id="om-agent-default"><option value="">（未设置）</option></select>
+      </label>
+      <label>权限模式
+        <select id="om-agent-perm">
+          <option value="default">每步审批（默认）</option>
+          <option value="acceptEdits">自动接受编辑</option>
+          <option value="bypassPermissions">自动放行（不推荐）</option>
+        </select>
+      </label>
+      <label>模型
+        <input id="om-agent-model" type="text" list="om-agent-model-presets" placeholder="留空用默认模型" />
+      </label>
+      <datalist id="om-agent-model-presets">
+        <option value="opus"></option>
+        <option value="sonnet"></option>
+        <option value="haiku"></option>
+      </datalist>
+    </div>
+    <div class="row agent-actions">
+      <button id="om-agent-start" class="secondary">启动 bridge</button>
+      <button id="om-agent-stop" class="danger">停止 bridge</button>
+      <button id="om-agent-test" class="secondary">检测 bridge 与 agent</button>
+      <span id="om-agent-conn" class="hint om-agent-conn">○ 未连接</span>
+      <span id="om-agent-result" class="hint grow"></span>
+    </div>
+    <div class="row">
+      <label class="grow">工作基础目录 <input id="om-agent-basedir" type="text" placeholder="~/.vela-bridge/workspaces" /></label>
+    </div>
+    <p class="hint">每个对话自动在基础目录下建独立子目录（<code>&lt;基础目录&gt;/&lt;对话 id&gt;</code>）作为 agent 工作区，知识库与附件也存放在该子目录内。支持 <code>~</code>。权限模式是 agent 工具调用的审批策略：每步审批对每个工具弹卡等待允许；自动接受编辑放行文件编辑、其余仍审批；自动放行不再弹卡（agent 可直接执行任意命令，仅限可信环境）。聊天页输入框下方可按会话覆盖权限模式与模型。先启动 bridge：<code>cd bridge && npm i && node index.js</code>；token 无需手动设置——扩展与 bridge 首次握手自动配对。检测列出本机已装的 agent 及登录态；未登录时按提示的命令先完成登录。只用 Agent 引擎聊天时，无需配置下面的 LLM 供应商。</p>
+  </div>
+
+  <h2 id="om-llm-section">网页翻译</h2>
+  <p class="hint">配置兼容 OpenAI 或 Anthropic 协议的任意供应商。Base URL 填到版本根（如 <code>https://api.openai.com/v1</code>、<code>https://api.anthropic.com</code>、Ollama 填 <code>http://localhost:11434/v1</code>），保存时会自动归一。翻译的模型 / 语言 / 模式也可将鼠标悬停在页面浮窗的「翻译此页」按钮上就地切换。</p>
+
+  <div class="card" id="om-llm-card">
+    <div id="om-providers"></div>
+    <button id="om-add" class="secondary">＋ 添加供应商</button>
+
+    <h3>全局参数</h3>
+    <label>System Prompt（可空）<textarea id="om-system" rows="3" placeholder="留空则不发送 system"></textarea></label>
+    <div class="row">
+      <label>temperature <input id="om-temp" type="number" step="0.1" min="0" max="2" placeholder="留空=不发送" /></label>
+      <label>max_tokens <input id="om-maxtok" type="number" step="1" min="0" placeholder="0=不发送（Anthropic 默认 4096）" /></label>
+    </div>
+    <p class="hint">部分新模型（如 OpenAI o 系 / GPT-5 系）不接受 temperature 或 max_tokens，留空最稳。</p>
+
+    <h3>翻译参数</h3>
+    <div class="row">
+      <label>目标语言
+        <select id="om-tx-lang">
+          <option value="zh-CN">简体中文</option>
+          <option value="zh-TW">繁体中文</option>
+          <option value="en">英文</option>
+          <option value="ja">日文</option>
+          <option value="ko">韩文</option>
+          <option value="fr">法文</option>
+          <option value="de">德文</option>
+          <option value="es">西班牙文</option>
+          <option value="ru">俄文</option>
+          <option value="pt">葡萄牙文</option>
+          <option value="it">意大利文</option>
+        </select>
+      </label>
+      <label>默认模式
+        <select id="om-tx-mode">
+          <option value="bilingual">对照（译文在原文下方）</option>
+          <option value="immersive">沉浸（译文替换原文）</option>
+        </select>
+      </label>
+    </div>
+    <details>
+      <summary class="hint">高级参数</summary>
+      <div class="row">
+        <label>最大段数 <input id="om-tx-maxblocks" type="number" min="10" max="3000" /></label>
+        <label>最大字符数 <input id="om-tx-maxchars" type="number" min="5000" max="600000" step="1000" /></label>
+        <label>每批段数 <input id="om-tx-batchblocks" type="number" min="4" max="24" /></label>
+      </div>
+      <p class="hint">翻译按视口滚动逐步进行，这里限制单页累计翻译总量；批次越小回填越快，越大越省请求。</p>
+    </details>
+  </div>
+
+  <h2>选中快捷动作（右键菜单）</h2>
+  <div class="card">
+    <div id="om-qa-list"></div>
+    <div class="row actions">
+      <button id="om-qa-add" class="secondary">＋ 添加动作</button>
+      <button id="om-qa-reset" class="secondary">恢复默认</button>
+    </div>
+    <p class="hint">prompt 模板中的 {text} 会替换为选中文本（截前 2000 字符）。保存后右键菜单自动刷新。</p>
+  </div>
+
+  <div id="om-status" class="status"></div>
+  <button id="om-save">保存全部</button>
+
+  <template id="om-provider-tpl">
+    <div class="card provider">
+      <div class="row">
+        <label>名称 <input class="p-name" type="text" placeholder="显示名，如：我的中转" /></label>
+        <label>协议
+          <select class="p-kind">
+            <option value="openai">OpenAI 兼容</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </label>
+        <label class="p-default-line"><input class="p-default" type="radio" name="om-default" title="设为默认" /> 默认</label>
+      </div>
+      <div class="row">
+        <label class="grow">Base URL <input class="p-url" type="text" placeholder="https://api.openai.com/v1" /></label>
+        <label class="grow">API Key <input class="p-key" type="password" placeholder="sk-…" /></label>
+      </div>
+      <label>模型（逗号分隔，可自由填写）<input class="p-models" type="text" placeholder="gpt-4.1, claude-sonnet-5-5, qwen3:32b" /></label>
+      <div class="row actions">
+        <button class="p-test secondary">测试连接</button>
+        <span class="p-test-result hint"></span>
+        <button class="p-del danger">删除</button>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

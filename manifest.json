@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "Vela",
+  "description": "自定义 LLM 供应商的 AI 聊天助手：网页总结、网页翻译、划词就地翻译/代码解释、会话自带网页上下文",
+  "version": "0.7.10",
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/sidepanel/*",
+        "src/page/tx-runner.html",
+        "src/page/sel-panel.html"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ],
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "contextMenus",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Vela"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/sidepanel.html"
+  },
+  "options_ui": {
+    "open_in_tab": true,
+    "page": "src/options/options.html"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+M",
+        "mac": "Command+M"
+      }
+    },
+    "open-chat-tab": {
+      "description": "打开独立聊天页",
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      }
+    }
+  },
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArNtsnzz7ZrfOYxG/TzNUCpLyy/UtRJxnAP+vgt8hwgASzexMd5bcxB8bYLfYV3Wsf8vYvKssWr26MxY0cRkx4wkYpfN2+nnghvYF4QasUh1gVVgeAzXx59avgGdG0zXP96i1Rj9PaWFpEON23b9atR4fAfX7s8AJ8bpnNjnO9pPTU+ZnyuyS1kF3pzzQL79lMu0JoVmUTkwEyAqYYLmeq65BE1BNGCdF/aUYaCeckXthJ5y/fYl0yveAHnM0v0OPNttgjlGpX35bOMfJ5kNuj4FdEWHRT17bfp7rA6ugCR2x34LIirK3UlIIKvv3ZieG+ACWajAS0W+aX6VbngvAfwIDAQAB"
+}

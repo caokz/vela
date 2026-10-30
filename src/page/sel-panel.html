@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Vela 划词面板</title>
+  <style>
+    /* 面板独立于聊天页样式：自带轻量排版（markdown 输出 + 明暗两套） */
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: transparent; }
+    body {
+      font: 13.5px/1.65 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: #1f2329;
+      background: #fff;
+      border-radius: 12px;
+      border: 1px solid rgba(0,0,0,.1);
+      box-shadow: 0 12px 36px rgba(0,0,0,.2);
+      overflow: hidden;
+    }
+    header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid rgba(0,0,0,.06);
+      font-weight: 600; font-size: 13px;
+    }
+    header svg { color: #6841ea; flex: none; }
+    header .om-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    header button {
+      border: 0; background: none; cursor: pointer; padding: 2px; border-radius: 6px;
+      color: #646a73; font-size: 15px; line-height: 1;
+    }
+    header button:hover { background: rgba(0,0,0,.06); color: #1f2329; }
+
+    details.src { margin: 8px 12px 0; }
+    details.src summary {
+      cursor: pointer; color: #646a73; font-size: 12px; user-select: none;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    details.src summary:hover { color: #1f2329; }
+    details.src pre {
+      margin: 6px 0 0; padding: 8px 10px; max-height: 96px; overflow: auto;
+      background: rgba(0,0,0,.04); border-radius: 8px;
+      font: 12px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+    }
+
+    .om-body { padding: 10px 14px 4px; max-height: 320px; overflow: auto; }
+    .om-body p { margin: 0 0 8px; }
+    .om-body h3, .om-body h4, .om-body h5, .om-body h6 { margin: 10px 0 6px; font-size: 14px; }
+    .om-body ul, .om-body ol { margin: 0 0 8px; padding-left: 20px; }
+    .om-body blockquote {
+      margin: 6px 0; padding: 2px 10px; border-left: 3px solid rgba(104,65,234,.4);
+      color: #646a73;
+    }
+    .om-body code {
+      font: 12px/1.5 ui-monospace, Consolas, monospace;
+      background: rgba(104,65,234,.08); border-radius: 4px; padding: 1px 5px;
+    }
+    .om-body pre {
+      margin: 6px 0; padding: 10px; background: #f5f6f7; border-radius: 8px; overflow: auto;
+    }
+    .om-body pre code { background: none; padding: 0; font-size: 12px; }
+    .om-body table { border-collapse: collapse; margin: 6px 0; font-size: 12.5px; }
+    .om-body th, .om-body td { border: 1px solid rgba(0,0,0,.12); padding: 4px 8px; text-align: left; }
+    .om-body a { color: #6841ea; }
+
+    .om-empty { color: #646a73; }
+    .om-empty::after { content: '▍'; animation: blink 1s steps(1) infinite; color: #6841ea; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .om-error { margin: 10px 14px; padding: 8px 10px; border-radius: 8px; background: rgba(217,48,37,.08); color: #c5221f; font-size: 12.5px; }
+
+    footer { padding: 8px 12px 10px; }
+    .om-follow { display: flex; gap: 6px; }
+    .om-follow textarea {
+      flex: 1; resize: none; border: 1px solid rgba(0,0,0,.14); border-radius: 8px;
+      padding: 6px 10px; font: inherit; color: inherit; background: transparent;
+      height: 32px; max-height: 96px; outline: none;
+    }
+    .om-follow textarea:focus { border-color: #6841ea; }
+    .om-follow button {
+      border: 0; cursor: pointer; border-radius: 8px; padding: 0 12px;
+      background: #6841ea; color: #fff; font-size: 12.5px; font-weight: 600;
+    }
+    .om-follow button:hover { background: #5931d1; }
+    .om-follow button:disabled { opacity: .5; cursor: default; }
+    .om-tools { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+    .om-tools .om-hint { flex: 1; color: #646a73; font-size: 11.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .om-tools button {
+      border: 0; cursor: pointer; background: none; color: #646a73;
+      border-radius: 6px; padding: 3px 8px; font-size: 12px;
+    }
+    .om-tools button:hover { background: rgba(0,0,0,.06); color: #1f2329; }
+    .om-tools button:disabled { opacity: .4; cursor: default; }
+
+    @media (prefers-color-scheme: dark) {
+      body { background: #1b1c1f; color: #e8eaed; border-color: rgba(255,255,255,.1); }
+      header button { color: #9aa0a6; }
+      header button:hover { background: rgba(255,255,255,.1); color: #e8eaed; }
+      details.src summary { color: #9aa0a6; }
+      details.src summary:hover { color: #e8eaed; }
+      details.src pre { background: rgba(255,255,255,.06); }
+      .om-body blockquote { border-left-color: rgba(152,128,248,.5); color: #9aa0a6; }
+      .om-body code { background: rgba(152,128,248,.16); }
+      .om-body pre { background: #131417; }
+      .om-body th, .om-body td { border-color: rgba(255,255,255,.16); }
+      .om-follow textarea { border-color: rgba(255,255,255,.2); }
+      .om-tools button { color: #9aa0a6; }
+      .om-tools button:hover { background: rgba(255,255,255,.1); color: #e8eaed; }
+    }
+  </style>
+</head>
+<body>
+  <script type="module" src="sel-panel.js"></script>
+</body>
+</html>
