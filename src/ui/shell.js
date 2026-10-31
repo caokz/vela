@@ -2,6 +2,8 @@
 // 取代旧版 body.innerHTML 一把梭；id（om-topbar/om-messages/om-composer/om-input/om-send…）
 // 与流式渲染类名（om-msg/om-body/om-error）保持不变，E2E 与 smoke-test 兼容。
 
+import { LOGO_SVG } from './brand.js';
+
 const I = (inner, size = 20) => {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
@@ -27,8 +29,8 @@ export const ICONS = {
   doc: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 2.6 4 5.6 4 9s-1.2 6.4-4 9c-2.8-2.6-4-5.6-4-9s1.2-6.4 4-9z"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
-  // V + 右笔收笔圆点：独有字形（与 assets/icons 生成源 gen-icons.mjs 同步改）
-  logo: '<path d="M5 6l7 12L19 6"/><circle cx="20.9" cy="2.7" r="1.7" fill="currentColor" stroke="none"/>',
+  // 船帆 logo：路径定义在 brand.js（扩展图标生成器同源）
+  logo: LOGO_SVG,
   paperclip: '<path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
   book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>',
   file: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/>',
@@ -97,6 +99,14 @@ export function buildShell({ variant = 'panel' }) {
   scrim.id = 'om-scrim';
 
   // ---- 主区 ----
+  // 引擎（会话级）：Agent / LLM 问答 / LLM 任务；切换时空会话原地换，有消息则新建对话
+  const engine = el('select', 'om-engine-select');
+  engine.id = 'om-engine';
+  engine.title = '聊天引擎：Agent 走本机 bridge；LLM 直连设置页的供应商（任务模式可调用浏览器工具）';
+  engine.innerHTML = '<option value="agent">Agent</option>'
+    + '<option value="llm">LLM 问答</option>'
+    + '<option value="llm-tools">LLM 任务</option>';
+
   const model = el('select', 'om-model-select');
   model.id = 'om-model';
   model.title = '选择模型';
@@ -115,6 +125,7 @@ export function buildShell({ variant = 'panel' }) {
 
   const topbar = el('header', 'om-topbar', [
     menuBtn,
+    engine,
     model,
     agentSelect,
     el('div', 'om-top-spacer'),
@@ -199,7 +210,7 @@ export function buildShell({ variant = 'panel' }) {
     messages, column,
     composer, input, send, stop: stopBtn, jump,
     attachBtn, kbBtn, attachRow,
-    model, agentSelect, permSelect, agentModel,
+    model, engine, agentSelect, permSelect, agentModel,
     newBtn, settingsBtn, delBtn, regenBtn, exportBtn,
     toast,
   };

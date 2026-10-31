@@ -3,7 +3,7 @@
 // 页面功能（总结/翻译）接线、pendingTask 消费。DOM 骨架由 shell.js 提供。
 
 import { renderMarkdown } from './markdown.js';
-import { streamChat, loadSettings } from '../llm/store.js';
+import { streamChat, loadSettings, saveSettings } from '../llm/store.js';
 import {
   loadConversations, saveConversations, newConversation,
   newUserItem, newAssistantItem, updateConversation, deleteConversation, makeTitle,
@@ -13,6 +13,16 @@ import { summarizeCurrentTab, translateCurrentTab, cancelTranslate } from '../pa
 import { getAgentClient } from '../agent/client.js';
 import { buildAgentPrompt, buildConversationMarkdown, knowledgeLocalDirs } from '../agent/compose.js';
 import { createTurnState, applyEvent, markRendered, turnStateToMeta, stateFromMeta } from '../agent/render.js';
+import { runToolLoop, repairToolTrail } from '../llm/tool-loop.js';
+import { BROWSER_TOOLS, TOOLS_SYSTEM_PROMPT } from '../llm/browser-tools.js';
+import { createFsTools, discoverSkills, fsSystemPrompt } from '../llm/fs-tools.js';
+import { putHandle, deleteHandle, loadRoots, ensurePermission } from '../kb/store.js';
+import { readFileHandle } from '../kb/files.js';
+import { syncRootsToWorkspace } from '../kb/sync.js';
+import { loadBridgeRoots } from '../kb/bridge-fs.js';
+import { installCtxGuard } from '../util/ctx-guard.js';
+
+const ENGINE_LABELS = { agent: 'Agent', llm: 'LLM 问答', 'llm-tools': 'LLM 任务' };
 
 const PERSIST_THROTTLE_MS = 500;
 const AGENTS_CACHE_MS = 30000;
@@ -54,6 +64,17 @@ function sanitizeName(name) {
 }
 
 export async function createChatView() {
+  // 扩展被重新加载 / 更新后，页面里还开着的旧聊天卡 / 面板：嵌在网页里的聊天卡自动重载成新版，
+  // 顶层页面只提示（重载会丢掉未发送的输入）
+  installCtxGuard(() => {
+    if (window.parent !== window) {
+      let again = false;
+      try { again = Date.now() - Number(sessionStorage.getItem('om-ctx-reload') || 0) < 15000; sessionStorage.setItem('om-ctx-reload', String(Date.now())); } catch { /* 存储不可用时直接重载一次 */ }
+      if (!again) { location.reload(); return; } // 15 秒内已重载过一次仍失效：不循环，转为提示
+    }
+    const t = document.getElementById('om-toast');
+    if (t) { t.textContent = '扩展已更新或重新加载：请刷新本页面后继续使用'; t.className = 'om-toast om-toast--error om-toast--show'; }
+  });
   const variant = location.pathname.includes('chatpage') ? 'wide' : 'panel';
   const R = buildShell({ variant });
 
@@ -87,20 +108,49 @@ export async function createChatView() {
     onStatus: handleAgentStatus,
   });
 
+  // 会话字段小改：内存与存储同改，并把存储侧刷新的 updatedAt 同步回内存。
+  // 只写存储会让多视图同步（storage.onChanged 200ms 防抖、内容比对）判定为外部改动而
+  // 整表重载内存——若恰逢一次发送正在进行，进行中的会话对象被换掉，刚发的消息随即丢失
+  async function patchConversation(conv, fn) {
+    fn(conv);
+    const saved = await updateConversation(conv.id, fn);
+    if (saved) conv.updatedAt = saved.updatedAt;
+  }
+
   function currentEngine() {
     const eng = conversations.find((c) => c.id === currentId)?.engine || 'llm';
     // 未配供应商时 LLM 选项不出现，引擎一律按 agent 处理
     return providersEmpty && eng === 'llm' ? 'agent' : eng;
   }
 
+  // 顶栏引擎下拉的取值：agent | llm（问答）| llm-tools（任务模式，可调用浏览器工具）
+  function engineKey(conv) {
+    if (!conv) return 'agent';
+    const eng = conv.engine || 'llm';
+    if (eng !== 'llm' || providersEmpty) return 'agent';
+    return conv.llmMode === 'tools' ? 'llm-tools' : 'llm';
+  }
+
+  function applyEngineKey(conv, key) {
+    if (key === 'agent') {
+      conv.engine = 'agent';
+      delete conv.llmMode;
+    } else {
+      conv.engine = 'llm';
+      conv.llmMode = key === 'llm-tools' ? 'tools' : 'chat';
+    }
+  }
+
   function selectedAgent() {
     return R.agentSelect.value || '';
   }
 
-  // 新会话一律 agent 引擎（顶栏已无切换入口）；历史 LLM 会话保留原引擎继续可用
+  // 新会话引擎：设置页 / 顶栏最近一次选择的默认值（未配供应商时 LLM 不可用，落回 agent）
+  let defaultEngine = 'agent';
+  let toolMaxSteps = 12;
   function newConv(title) {
     const conv = newConversation(title);
-    conv.engine = 'agent';
+    applyEngineKey(conv, providersEmpty && defaultEngine !== 'agent' ? 'agent' : defaultEngine);
     return conv;
   }
 
@@ -199,8 +249,10 @@ export async function createChatView() {
   function syncEngineUi() {
     const engine = currentEngine();
     const conv = conversations.find((c) => c.id === currentId);
+    R.engine.value = engineKey(conv);
     R.model.style.display = engine === 'llm' ? '' : 'none';
     R.agentSelect.style.display = engine === 'agent' ? '' : 'none';
+    if (engine === 'llm') syncLlmModelSelect(conv);
     if (engine === 'agent') {
       R.permSelect.style.display = '';
       R.permSelect.value = conv?.permissionMode || permDefault;
@@ -222,13 +274,52 @@ export async function createChatView() {
     renderMessages();
   }
 
+  // 引擎切换（会话级）：空会话原地换；已有消息的会话不改写历史引擎——agent 会话绑着
+  // SDK 会话 id 与工作区，混用会串上下文——改为新建一个该引擎的对话。所选值记为新会话默认
+  R.engine.addEventListener('change', async () => {
+    const key = R.engine.value;
+    if (streaming || translating) {
+      syncEngineUi();
+      showToast(R.toast, '请等待当前回复完成后再切换引擎', 'error');
+      return;
+    }
+    if (key !== 'agent' && providersEmpty) {
+      syncEngineUi();
+      showToast(R.toast, 'LLM 引擎需要先在设置页配置供应商', 'error');
+      return;
+    }
+    defaultEngine = key;
+    loadSettings().then((s) => saveSettings({ ...s, chat: { ...s.chat, defaultEngine: key } })).catch(() => {});
+    let conv = conversations.find((c) => c.id === currentId);
+    if (conv && !conv.items.length) {
+      applyEngineKey(conv, key);
+    } else {
+      conv = newConv('新对话');
+      attachPageCtx(conv);
+      conversations.unshift(conv);
+      currentId = conv.id;
+      showToast(R.toast, `已新建「${ENGINE_LABELS[key]}」对话`);
+    }
+    await saveConversations(conversations);
+    renderConvList();
+    syncEngineUi();
+    R.input.focus();
+  });
+
+  // LLM 模型选择（会话级）：存 [providerId, model]，发送时按会话精确路由到该供应商
+  R.model.addEventListener('change', async () => {
+    const conv = conversations.find((c) => c.id === currentId);
+    const sel = selectedLlm();
+    if (!conv || !sel.model) return;
+    await patchConversation(conv, (c) => { c.llmProviderId = sel.providerId; c.llmModel = sel.model; });
+  });
+
   // 会话级权限模式：写回会话记录，session.new/resume 每轮带上，无需新会话
   R.permSelect.addEventListener('change', async () => {
     const conv = conversations.find((c) => c.id === currentId);
     if (!conv) return;
     const v = R.permSelect.value;
-    conv.permissionMode = v;
-    await updateConversation(conv.id, (c) => { c.permissionMode = v; });
+    await patchConversation(conv, (c) => { c.permissionMode = v; });
     showToast(R.toast, `权限模式：${PERM_LABELS[v] || v}（下一轮生效）`);
   });
 
@@ -237,8 +328,7 @@ export async function createChatView() {
     const conv = conversations.find((c) => c.id === currentId);
     if (!conv) return;
     const v = R.agentModel.value;
-    if (v) conv.model = v; else delete conv.model;
-    await updateConversation(conv.id, (c) => {
+    await patchConversation(conv, (c) => {
       if (v) c.model = v; else delete c.model;
     });
     showToast(R.toast, v ? `模型：${v}（下一轮生效）` : '模型：回到默认（下一轮生效）');
@@ -339,8 +429,7 @@ export async function createChatView() {
       done = true;
       const v = input.value.trim();
       if (save && v && v !== conv.title) {
-        conv.title = v;
-        await updateConversation(conv.id, (c) => { c.title = v; });
+        await patchConversation(conv, (c) => { c.title = v; });
       }
       renderConvList();
     };
@@ -439,11 +528,20 @@ export async function createChatView() {
   }
 
   // ---- 模型选择器 ----
+  let llmDefaultVal = ''; // 激活供应商首个模型：会话没存过选择时的落点
   async function renderModelOptions() {
     const settings = await loadSettings();
     providersEmpty = !settings.providers.length;
     permDefault = settings.agentBridge.permissionMode || 'default';
     modelDefault = settings.agentBridge.model || '';
+    defaultEngine = ENGINE_LABELS[settings.chat.defaultEngine] ? settings.chat.defaultEngine : 'agent';
+    toolMaxSteps = Number(settings.chat.toolMaxSteps) || 12;
+    // 引擎下拉：未配供应商时 LLM 两项置灰
+    for (const opt of R.engine.options) {
+      if (opt.value === 'agent') continue;
+      opt.disabled = providersEmpty;
+      opt.textContent = ENGINE_LABELS[opt.value] + (providersEmpty ? '（未配置供应商）' : '');
+    }
     R.model.innerHTML = '';
     for (const p of settings.providers) {
       for (const m of p.models) {
@@ -454,10 +552,9 @@ export async function createChatView() {
       }
     }
     const provider = settings.providers.find((p) => p.id === settings.activeProviderId);
-    const activeVal = provider?.models[0] ? JSON.stringify([provider.id, provider.models[0]]) : '';
-    if (activeVal && R.model.querySelector(`option[value='${CSS.escape(activeVal)}']`)) {
-      R.model.value = activeVal;
-    }
+    llmDefaultVal = provider?.models[0] ? JSON.stringify([provider.id, provider.models[0]]) : '';
+    if (!hasModelOption(llmDefaultVal)) llmDefaultVal = R.model.options[0]?.value || '';
+    if (llmDefaultVal) R.model.value = llmDefaultVal;
     if (!settings.providers.length) {
       const opt = document.createElement('option');
       opt.textContent = '未配置供应商';
@@ -467,13 +564,29 @@ export async function createChatView() {
     }
   }
 
-  function selectedModel() {
+  function hasModelOption(val) {
+    return !!val && [...R.model.options].some((o) => o.value === val);
+  }
+
+  // 切到某会话时恢复它记住的 [供应商, 模型]；记的模型已从设置页删掉则落回默认
+  function syncLlmModelSelect(conv) {
+    const saved = conv?.llmModel ? JSON.stringify([conv.llmProviderId || '', conv.llmModel]) : '';
+    if (hasModelOption(saved)) R.model.value = saved;
+    else if (llmDefaultVal) R.model.value = llmDefaultVal;
+  }
+
+  // 当前选中的 { providerId, model }：两者必须一起走，streamChat 按 providerId 精确路由
+  function selectedLlm() {
     try {
-      const [, model] = JSON.parse(R.model.value);
-      return model;
+      const [providerId, model] = JSON.parse(R.model.value);
+      return { providerId: providerId || '', model: model || '' };
     } catch {
-      return '';
+      return { providerId: '', model: '' };
     }
+  }
+
+  function selectedModel() {
+    return selectedLlm().model;
   }
 
   // ---- 消息渲染 ----
@@ -537,6 +650,15 @@ export async function createChatView() {
     [/^(websearch|webfetch|fetch)$/i, 'globe'],
     [/^(task|agent)$/i, 'bot'],
     [/^(todo|todowrite|todoread|plan)$/i, 'doc'],
+    // LLM 任务模式的浏览器工具
+    [/^(get_current_page|get_selection|read_tab|list_tabs)$/i, 'doc'],
+    [/^(fetch_url|open_tab)$/i, 'globe'],
+    [/^download_file$/i, 'download'],
+    // 本机知识库文件工具
+    [/^(list_files|load_skill)$/i, 'folder'],
+    [/^search_files$/i, 'search'],
+    [/^read_file$/i, 'file'],
+    [/^(write_file|edit_file)$/i, 'edit'],
   ];
 
   // 聚合行的中文工具名（对齐 Orca 的「搜索 6 次」「读取 7 文件」）；未命中用原始名
@@ -547,6 +669,9 @@ export async function createChatView() {
     grep: '搜索', glob: '查找', websearch: '联网搜索', webfetch: '网页读取', fetch: '网页读取',
     task: '子任务', agent: '子任务',
     todo: '任务清单', todowrite: '任务清单', todoread: '任务清单', plan: '计划',
+    get_current_page: '读取网页', get_selection: '读取选中', list_tabs: '列出标签页', read_tab: '读取标签页',
+    fetch_url: '联网读取', open_tab: '打开网页', download_file: '下载文件',
+    list_files: '列目录', search_files: '搜索文件', read_file: '读取文件', write_file: '写入文件', edit_file: '编辑文件', load_skill: '加载 skill',
   };
 
   function toolIconEl(title) {
@@ -759,6 +884,12 @@ export async function createChatView() {
       if (thought) wrap.appendChild(thought);
       if (steps) wrap.appendChild(steps);
     }
+    // LLM 任务模式的工具步骤：与 agent 步骤同一套渲染（克隆后回放，不改写已存记录）
+    if (item.meta?.tools?.steps?.length) {
+      const st = stateFromMeta(structuredClone({ steps: item.meta.tools.steps }));
+      const steps = agentStepsEl([...st.steps.values()]);
+      if (steps) wrap.appendChild(steps);
+    }
     const body = document.createElement('div');
     body.className = 'om-body markdown';
     body.innerHTML = renderMarkdown(item.content);
@@ -899,14 +1030,50 @@ export async function createChatView() {
   // ---- 流式控制 ----
   // 存储写入串行化 + 节流：增量期间 500ms 一写（内存 localContent 是权威值），
   // 结束/停止/出错强制落盘。并发 updateConversation 会互相覆盖丢字，必须排队。
-  async function runAssistantTurn(conv, userItem, model) {
-    const history = conv.items
-      .filter((i) => i.type === 'question' || (i.content && !i.error))
-      .map((i) => ({ role: i.type === 'question' ? 'user' : 'assistant', content: i.content }));
+  // sel = { providerId, model }：随会话记住，发送时精确路由到该供应商。
+  // 会话 llmMode='tools' 时走任务模式：工具循环（tool-loop.js）+ 浏览器工具，步骤与 agent 同款渲染。
+  async function runAssistantTurn(conv, userItem, sel) {
+    const toolsMode = conv.llmMode === 'tools';
+    // 任务轮的正文只是展示层（各段文本拼起来的渲染稿）：真实上下文是持久化的消息轨迹
+    // （工具调用 + 工具结果 + 各段正文）。回传轨迹而不是纯文本，「继续」与追问才能带着
+    // 已做过的工具结果接着做——否则模型看不到自己做过什么，整个任务从零重来，步数永远不够
+    let history = [];
+    for (const i of conv.items) {
+      if (i.type === 'question') { history.push({ role: 'user', content: i.content }); continue; }
+      if (i.error) continue;
+      // 轨迹优先于正文：任务轮的真实上下文是轨迹里的工具调用 + 结果 + 各段正文；
+      // 纯工具轮正文可以为空，只回传正文会丢掉整段任务进度
+      const trail = i.meta?.tools?.trail;
+      if (Array.isArray(trail) && trail.length) history.push(...trail);
+      else if (i.content) history.push({ role: 'assistant', content: i.content });
+    }
+    // 旧版本停止的工具轮可能存下「assistant 带工具调用却没有结果消息」的残缺轨迹（协议
+    // 要求每个 tool_call_id 都有响应，缺了整轮请求被服务端 400 拒掉）：拼装后统一修复
+    history = repairToolTrail(history);
     // 网页上下文：LLM 引擎无状态，每轮请求都注入 system 消息（chip 上可移除）
     if (conv.pageCtx) history.unshift({ role: 'system', content: pageCtxPrompt(conv.pageCtx) });
+    let tools = BROWSER_TOOLS;
+    if (toolsMode) {
+      // 本机知识库（浏览器授权）：文件读写工具 + 说明型 skill（.vela/skills/*/SKILL.md）
+      const roots = await grantedRoots(conv, { bridge: true });
+      const skills = roots.length ? await discoverSkills(roots).catch(() => []) : [];
+      tools = [...BROWSER_TOOLS, ...createFsTools(roots, skills)];
+      // 自带 system 时 streamChat 不再注入设置页全局 System Prompt，这里一并带上；
+      // 步数上限每轮发送读当前值：模块变量只在初始化时刷新，设置页把 12 调到 50 后
+      // 已开着的聊天窗仍会按 12 中止任务（storage.onChanged 不监听 llmSettings）
+      const settings = await loadSettings();
+      toolMaxSteps = Number(settings.chat?.toolMaxSteps) || 12;
+      history.unshift({ role: 'system', content: [TOOLS_SYSTEM_PROMPT, fsSystemPrompt(roots, skills), settings.defaults?.systemPrompt].filter(Boolean).join('\n\n') });
+    } else {
+      // 问答模式不调工具：知识库里授权的单个文件直接附进上下文（文件夹需 LLM 任务按需读取）
+      const kbText = await llmKbContext(conv);
+      if (kbText) history.unshift({ role: 'system', content: kbText });
+    }
 
-    const answer = newAssistantItem(conv.id, userItem.id, model);
+    conv.llmProviderId = sel.providerId;
+    conv.llmModel = sel.model;
+    const answer = newAssistantItem(conv.id, userItem.id, sel.model);
+    if (toolsMode) answer.meta = { tools: { steps: [] } };
     conv.items.push(answer);
     await saveConversations(conversations);
     renderMessages();
@@ -914,6 +1081,8 @@ export async function createChatView() {
 
     let localContent = '';
     let localError = '';
+    let localSteps = null; // 任务模式：工具步骤（持久化到 answer.meta.tools）
+    let localTrail = null; // 任务模式：本轮消息轨迹（assistant 工具调用 + 工具结果 + 各段正文）
     let lastPersist = 0;
     let writeChain = Promise.resolve();
     const persist = () => {
@@ -923,6 +1092,7 @@ export async function createChatView() {
           if (!it) return;
           it.content = localContent;
           it.error = localError;
+          if (localSteps) it.meta = { ...(it.meta || {}), tools: { steps: localSteps, ...(localTrail ? { trail: localTrail } : {}) } };
         }),
       );
       return writeChain;
@@ -948,9 +1118,30 @@ export async function createChatView() {
     };
 
     const bodyEl = () => R.column.querySelector(`[data-item-id='${answer.id}'] .om-body`);
+    // 任务模式的实时步骤区：插在正文前，步骤变化时整块重建（步骤数有限，开销可忽略）
+    const toolState = toolsMode ? createTurnState() : null;
+    let stepsDirty = false;
+    const liveStepsEl = () => {
+      const wrap = R.column.querySelector(`[data-item-id='${answer.id}']`);
+      if (!wrap) return null;
+      let box = wrap.querySelector('.om-llm-steps');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'om-llm-steps';
+        wrap.insertBefore(box, wrap.querySelector('.om-body'));
+      }
+      return box;
+    };
     let raf = 0;
     const flush = () => {
       raf = 0;
+      if (stepsDirty && toolState) {
+        stepsDirty = false;
+        const box = liveStepsEl();
+        const steps = box && agentStepsEl([...toolState.steps.values()]);
+        box?.querySelector('.om-agent-steps')?.remove();
+        if (steps) box.prepend(steps);
+      }
       const el = bodyEl();
       if (el) {
         el.innerHTML = renderMarkdown(localContent);
@@ -970,27 +1161,83 @@ export async function createChatView() {
         await persistNow(true);
       },
     };
+    // 发送按钮切成「停止」：流式期间点它是停止本轮（旧版漏了这句，按钮仍显示「发送」，
+    // 用户以为在发新消息，实际把正在生成的回答停掉了）
+    setStreamingUi(true);
     const answerWrap = R.column.querySelector(`[data-item-id='${answer.id}']`);
     answerWrap?.classList.add('om-streaming');
 
     let finished = false;
     try {
-      await streamChat({
-        messages: history,
-        model,
-        signal: abort.signal,
-        onDelta: (d) => {
-          if (d.error) {
-            localError = d.error.message || JSON.stringify(d.error);
-            persistNow();
-          } else if (d.text) {
-            localContent += d.text;
+      if (toolsMode) {
+        const result = await runToolLoop({
+          messages: history,
+          tools,
+          maxSteps: toolMaxSteps,
+          signal: abort.signal,
+          callModel: async ({ messages, tools, signal, onText }) => {
+            const out = {};
+            await streamChat({
+              messages,
+              tools,
+              model: sel.model,
+              providerId: sel.providerId,
+              signal,
+              onDelta: (d) => {
+                if (d.error) out.error = d.error.message || JSON.stringify(d.error);
+                else if (d.text) onText(d.text);
+                if (d.finished && d.toolCalls) out.toolCalls = d.toolCalls;
+              },
+            });
+            return out;
+          },
+          approve: (req) => askToolApproval(conv.id, answer.id, req, abort.signal),
+          onEvent: (e) => {
+            applyEvent(toolState, e);
+            localContent = toolState.content;
+            if (toolState.changed.steps) {
+              stepsDirty = true;
+              localSteps = [...toolState.steps.entries()].map(([id, s]) => ({ ...s, id }));
+            }
+            markRendered(toolState);
             persistThrottled();
             scheduleFlush();
-          }
-          if (d.finished && !finished) finished = true;
-        },
-      });
+          },
+        });
+        if (result.stopReason === 'error') localError = result.error;
+        else if (result.stopReason === 'max_steps') {
+          localContent += `${localContent ? '\n\n' : ''}> 已达到单轮最多 ${toolMaxSteps} 步工具调用，任务暂停。回复「继续」可从中断处接着做，或在设置页调大步数上限（已开的聊天窗即时生效）。`;
+        }
+        // 本轮新增的消息轨迹落 meta：下一轮（「继续」/追问）原样回传，模型才接得上进度。
+        // base64 附件不落 storage（体积大且只在本轮在途有效），其余原样保留（结果已在
+        // 工具循环里按 24K 上限截断）
+        const trail = result.messages.slice(history.length);
+        if (trail.length) {
+          localTrail = trail.map((m) => {
+            if (!m.attachments) return m;
+            const { attachments, ...rest } = m;
+            return rest;
+          });
+        }
+      } else {
+        await streamChat({
+          messages: history,
+          model: sel.model,
+          providerId: sel.providerId,
+          signal: abort.signal,
+          onDelta: (d) => {
+            if (d.error) {
+              localError = d.error.message || JSON.stringify(d.error);
+              persistNow();
+            } else if (d.text) {
+              localContent += d.text;
+              persistThrottled();
+              scheduleFlush();
+            }
+            if (d.finished && !finished) finished = true;
+          },
+        });
+      }
     } catch (err) {
       if (err.name !== 'AbortError') {
         localError = err.message || String(err);
@@ -1079,6 +1326,107 @@ export async function createChatView() {
     if (touched && scrollPinned) R.messages.scrollTop = R.messages.scrollHeight;
   }
 
+  // LLM 问答模式的知识库上下文：授权的单个文件读成文本（文本 / Office；PDF、图片跳过），
+  // 每个最多 30000 字符、合计 80000 字符；文件夹不展开，提示改用任务模式
+  async function llmKbContext(conv) {
+    const roots = await grantedRoots(conv, { bridge: true });
+    if (!roots.length) return '';
+    const parts = [];
+    let budget = 80000;
+    for (const r of roots.filter((x) => x.kind === 'file')) {
+      try {
+        const { text, attachments } = await readFileHandle(r.handle, r.name);
+        if (attachments) { parts.push(`（${r.name} 是 PDF / 图片，问答模式不读取；请切到「LLM 任务」）`); continue; }
+        const t = text.slice(0, Math.min(30000, budget));
+        budget -= t.length;
+        parts.push(t);
+        if (budget <= 0) break;
+      } catch (e) {
+        parts.push(`（${r.name} 读取失败：${e.message}）`);
+      }
+    }
+    const dirs = roots.filter((x) => x.kind === 'dir').map((x) => x.name);
+    if (dirs.length) parts.push(`知识库还包含文件夹 ${dirs.join('、')}，问答模式无法读取；如需分析请告诉用户切换到「LLM 任务」引擎。`);
+    return parts.length ? `以下是用户知识库中的文件内容，回答时作为参考：\n\n${parts.join('\n\n---\n\n')}` : '';
+  }
+
+  // diff 预览：+ / - 行着色（textContent 赋值，防注入）
+  function diffEl(text) {
+    const pre = document.createElement('pre');
+    pre.className = 'om-diff';
+    for (const line of String(text).split('\n')) {
+      const row = document.createElement('div');
+      row.className = line.startsWith('+') ? 'is-add' : line.startsWith('-') ? 'is-del' : '';
+      row.textContent = line || ' ';
+      pre.appendChild(row);
+    }
+    return pre;
+  }
+
+  // LLM 任务模式的工具审批卡：挂在本轮回答的步骤区下方，Promise 落定为允许/拒绝。
+  // 勾「本对话不再询问」后同一工具在本对话（本页面存活期间）自动放行；停止本轮即按拒绝收场
+  const toolAllow = new Map(); // convId -> Set<toolName>
+  function askToolApproval(convId, answerId, { tool, args }, signal) {
+    if (toolAllow.get(convId)?.has(tool.name)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const card = document.createElement('div');
+      card.className = 'om-perm om-llm-perm';
+      const title = document.createElement('div');
+      title.className = 'om-perm-title';
+      title.textContent = `请求执行：${tool.approvalText?.(args) || tool.name}`;
+      const detail = document.createElement('div');
+      detail.className = 'om-perm-detail';
+      detail.textContent = JSON.stringify(args, null, 2).slice(0, 1200);
+      // 写文件类工具：卡片换成修改前后的 diff（异步算好后替换参数 JSON）
+      if (tool.approvalDetail) {
+        detail.textContent = '正在计算修改内容…';
+        Promise.resolve(tool.approvalDetail(args)).then((d) => {
+          title.textContent = `请求执行：${d.title}`;
+          detail.replaceChildren(diffEl(d.diff || '（无改动）'));
+        }).catch((e) => { detail.textContent = `无法预览修改：${e.message}（允许后执行多半也会失败）`; });
+      }
+      const always = document.createElement('label');
+      always.className = 'om-perm-always';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      always.append(box, document.createTextNode(' 本对话不再询问此类操作'));
+      const actions = document.createElement('div');
+      actions.className = 'om-perm-actions';
+      const allow = document.createElement('button');
+      allow.className = 'om-perm-allow';
+      allow.textContent = '允许';
+      const deny = document.createElement('button');
+      deny.className = 'om-perm-deny';
+      deny.textContent = '拒绝';
+      const done = (ok) => {
+        signal?.removeEventListener('abort', onAbort);
+        if (ok && box.checked) {
+          if (!toolAllow.has(convId)) toolAllow.set(convId, new Set());
+          toolAllow.get(convId).add(tool.name);
+        }
+        card.remove();
+        resolve(ok);
+      };
+      const onAbort = () => done(false);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      allow.addEventListener('click', () => done(true));
+      deny.addEventListener('click', () => done(false));
+      actions.append(allow, deny);
+      card.append(title, detail, always, actions);
+      const wrap = R.column.querySelector(`[data-item-id='${answerId}']`);
+      let host = wrap?.querySelector('.om-llm-steps');
+      if (wrap && !host) {
+        host = document.createElement('div');
+        host.className = 'om-llm-steps';
+        wrap.insertBefore(host, wrap.querySelector('.om-body'));
+      }
+      if (!host) { done(false); return; }
+      host.appendChild(card);
+      if (scrollPinned) R.messages.scrollTop = R.messages.scrollHeight;
+      showToast(R.toast, '任务需要你确认一个操作');
+    });
+  }
+
   function permissionEl(perm) {
     const card = document.createElement('div');
     card.className = 'om-perm';
@@ -1113,6 +1461,28 @@ export async function createChatView() {
     parts.push(actions);
     card.append(...parts);
     return card;
+  }
+
+  // Agent 引擎读不到浏览器授权的句柄（拿不到绝对路径）：发送前增量上传到工作区 wsPath。
+  // 返回本轮真正同步（含增量跳过）的条目 id 集合，prompt 据此标注未同步的条目
+  async function syncKbToWorkspace(conv) {
+    const entries = (conv.knowledge ?? []).filter((k) => k.kind === 'handle');
+    if (!entries.length) return new Set();
+    const roots = await grantedRoots(conv);
+    if (!roots.length) return new Set();
+    const settings = await loadSettings();
+    const r = await syncRootsToWorkspace({
+      roots,
+      wsPaths: new Map(entries.map((k) => [k.id, k.wsPath])),
+      convId: conv.id,
+      cwdBase: settings.agentBridge.baseDir || '',
+      uploadFile: (p) => agentClient.uploadFile(p),
+      sanitize: sanitizeName,
+      onProgress: (name, done, total) => showToast(R.toast, `同步知识库 ${done + 1}/${total}：${name}`, 'info', true),
+    });
+    if (r.uploaded) showToast(R.toast, `知识库已同步 ${r.uploaded} 个文件到工作区${r.truncated ? '（文件过多 / 过大，部分跳过）' : ''}`);
+    else if (r.truncated) showToast(R.toast, '知识库文件过多 / 过大，部分未同步', 'error');
+    return new Set(roots.map((root) => root.id));
   }
 
   async function runAgentTurn(conv, userItem, agentId) {
@@ -1174,6 +1544,7 @@ export async function createChatView() {
 
     try {
       await agentClient.ensureReady();
+      const syncedKbIds = await syncKbToWorkspace(conv);
       // 工作区 = baseDir/<会话 id>（bridge 侧解析并创建，上传/知识库都落这里）；
       // 绑定 projectDir 时它覆盖 cwd，工作区自动加入 additionalDirectories；
       // 知识库本地目录走 additionalDirectories；权限模式会话级覆盖设置页默认
@@ -1219,7 +1590,7 @@ export async function createChatView() {
         localError = message;
         agentTurn.done();
       };
-      await agentClient.prompt(sessionId, buildAgentPrompt(conv, userItem, { workspacePath }));
+      await agentClient.prompt(sessionId, buildAgentPrompt(conv, userItem, { workspacePath, syncedIds: syncedKbIds }));
       await agentTurn.donePromise;
       agentTurn.settled = true; // 收尾中：迟到的 interrupt 不再覆盖结论
       // 网页上下文已并入本条 prompt（compose 检测 pageCtxSent）：agent 会话有记忆，只注入一次
@@ -1281,7 +1652,7 @@ export async function createChatView() {
   }
 
   // 组装一条用户消息并跑回复。meta：{kind,url,title} 附着在消息上渲染来源 chip。
-  async function sendPrepared(text, meta = undefined, title = '') {
+  async function sendPreparedInner(text, meta = undefined, title = '') {
     let conv = conversations.find((c) => c.id === currentId);
     if (!conv) {
       conv = newConv(title || makeTitle(text));
@@ -1304,7 +1675,19 @@ export async function createChatView() {
       return;
     }
     if (currentEngine() === 'agent') await runAgentTurn(conv, userItem, selectedAgent());
-    else await runAssistantTurn(conv, userItem, selectedModel());
+    else await runAssistantTurn(conv, userItem, selectedLlm());
+  }
+
+  // 发送准备期（落盘提问 → 流式开始之间有多次 await）：多视图同步不得整表替换内存，
+  // 否则进行中的会话对象被换掉、刚追加的消息丢失。runAssistantTurn 收尾会重载存储兜底
+  let preparing = 0;
+  async function sendPrepared(...args) {
+    preparing++;
+    try {
+      await sendPreparedInner(...args);
+    } finally {
+      preparing--;
+    }
   }
 
   // ---- 模型守卫：未配置/未选择供应商必须给出可见提示，不能静默返回 ----
@@ -1357,6 +1740,7 @@ export async function createChatView() {
     const pending = [...pendingAttachments];
     if (!text && !pending.length) return;
     if (!ensureEngine()) return;
+    await ensureKbAccess(conversations.find((c) => c.id === currentId));
     if (pending.length && currentEngine() !== 'agent') {
       showToast(R.toast, 'LLM 引擎会话不支持附件，请新建 Agent 引擎对话再发', 'error');
       return;
@@ -1428,6 +1812,7 @@ export async function createChatView() {
     if (streaming) return;
     const conv = conversations.find((c) => c.id === currentId);
     if (!conv) return;
+    await ensureKbAccess(conv);
     const lastUserIdx = conv.items.map((i) => i.type).lastIndexOf('question');
     if (lastUserIdx === -1) return;
     // 丢弃最后的助手回复（如有），重发最后一条用户消息
@@ -1437,7 +1822,7 @@ export async function createChatView() {
     }
     renderMessages();
     if (currentEngine() === 'agent') await runAgentTurn(conv, conv.items[lastUserIdx], selectedAgent());
-    else await runAssistantTurn(conv, conv.items[lastUserIdx], selectedModel());
+    else await runAssistantTurn(conv, conv.items[lastUserIdx], selectedLlm());
   }
 
   // ---- 附件（本条消息）：回形针 / 拖放 / 粘贴，发送时上传工作区 uploads/ ----
@@ -1522,8 +1907,7 @@ export async function createChatView() {
   R.composer.appendChild(kbPop);
 
   async function saveKnowledge(conv, knowledge) {
-    conv.knowledge = knowledge;
-    await updateConversation(conv.id, (c) => { c.knowledge = knowledge; });
+    await patchConversation(conv, (c) => { c.knowledge = knowledge; });
     syncEngineUi();
     renderKbPop();
   }
@@ -1532,16 +1916,29 @@ export async function createChatView() {
     const row = document.createElement('div');
     row.className = 'om-kb-item';
     row.dataset.kbId = entry.id;
-    row.appendChild(svgIcon(entry.kind === 'local' ? 'folder' : 'file', 13));
+    const isDir = entry.kind === 'local' || (entry.kind === 'handle' && entry.handleKind === 'dir');
+    row.appendChild(svgIcon(isDir ? 'folder' : 'file', 13));
     const path = document.createElement('span');
     path.className = 'om-kb-path';
-    path.textContent = entry.kind === 'local' ? entry.path : `${entry.relPath}（${entry.name}）`;
-    path.title = entry.kind === 'local' ? entry.path : entry.relPath;
+    if (entry.kind === 'handle') {
+      path.textContent = entry.name; // 文件夹靠图标区分：路径格是 RTL 省略，尾斜杠会跑到前面
+      path.title = '本机授权（浏览器直接读取，无需 bridge）：LLM 任务按需读写；Agent 发送前自动同步到工作区';
+    } else {
+      path.textContent = entry.kind === 'local' ? entry.path : `${entry.relPath}（${entry.name}）`;
+      path.title = entry.kind === 'local' ? entry.path : entry.relPath;
+    }
     row.appendChild(path);
+    if (entry.kind === 'handle') {
+      const tag = document.createElement('span');
+      tag.className = 'om-kb-tag';
+      tag.textContent = '本机授权';
+      row.appendChild(tag);
+    }
     const del = document.createElement('button');
     del.textContent = '×';
     del.title = '移除';
     del.addEventListener('click', () => {
+      if (entry.kind === 'handle') deleteHandle(entry.id).catch(() => {});
       saveKnowledge(conv, (conv.knowledge || []).filter((k) => k.id !== entry.id));
     });
     row.appendChild(del);
@@ -1586,8 +1983,7 @@ export async function createChatView() {
         unbind.textContent = '清除';
         unbind.title = '解绑项目目录，恢复独立工作区';
         unbind.addEventListener('click', async () => {
-          await updateConversation(conv.id, (c) => { delete c.projectDir; });
-          delete conv.projectDir;
+          await patchConversation(conv, (c) => { delete c.projectDir; });
           renderKbPop();
           syncEngineUi();
           showToast(R.toast, '已恢复独立工作区（下一轮生效）');
@@ -1595,24 +1991,39 @@ export async function createChatView() {
         dirRow.appendChild(unbind);
       }
     }
-    kbPop.appendChild(dirRow);
+    // 工作目录绑定与 bridge 类入口只对 Agent 引擎有意义；LLM 引擎只留浏览器授权
+    const agentMode = currentEngine() === 'agent';
+    if (agentMode) kbPop.appendChild(dirRow);
     const list = document.createElement('div');
     list.className = 'om-kb-list';
     if (conv) for (const k of entries) list.appendChild(kbEntryEl(k, conv));
     kbPop.appendChild(list);
     const actions = document.createElement('div');
     actions.className = 'om-kb-actions';
+    // 浏览器授权（File System Access）：不依赖 bridge，LLM 任务直接读写；Agent 发送前自动同步到工作区
+    const grantDir = document.createElement('button');
+    grantDir.className = 'om-kb-primary';
+    grantDir.dataset.kbAct = 'grant-dir';
+    grantDir.textContent = '授权文件夹';
+    grantDir.title = '选择本机文件夹并授权浏览器访问（无需 bridge）：LLM 任务可读取 / 搜索 / 修改；Agent 发送前自动同步';
+    grantDir.addEventListener('click', () => addKbHandle('dir'));
+    const grantFile = document.createElement('button');
+    grantFile.className = 'om-kb-primary';
+    grantFile.dataset.kbAct = 'grant-file';
+    grantFile.textContent = '授权文件';
+    grantFile.title = '选择本机文件（可多选）并授权浏览器访问（无需 bridge）';
+    grantFile.addEventListener('click', () => addKbHandle('file'));
     const browse = document.createElement('button');
     browse.textContent = '浏览本机…';
-    browse.title = '在文件系统里勾选真实路径，零拷贝引用';
+    browse.title = '经 bridge 在文件系统里勾选真实路径，零拷贝引用（Agent 引擎）';
     browse.addEventListener('click', () => kbBrowse(kbBrowser.path || '~'));
     const pickFiles = document.createElement('button');
     pickFiles.textContent = '上传文件';
-    pickFiles.title = '内容拷贝进工作区 knowledge/（浏览器选择器拿不到原始路径）';
+    pickFiles.title = '经 bridge 把内容拷贝进工作区 knowledge/（Agent 引擎）';
     pickFiles.addEventListener('click', () => kbFileInput.click());
     const pickDir = document.createElement('button');
     pickDir.textContent = '上传目录';
-    pickDir.title = '目录内容拷贝进工作区 knowledge/（保留层级）';
+    pickDir.title = '经 bridge 把目录内容拷贝进工作区 knowledge/（保留层级，Agent 引擎）';
     pickDir.addEventListener('click', () => kbDirInput.click());
     const pathInput = document.createElement('input');
     pathInput.type = 'text';
@@ -1627,8 +2038,25 @@ export async function createChatView() {
         }
       }
     });
-    actions.append(browse, pickFiles, pickDir, pathInput);
+    // Agent：全部入口。LLM：浏览器授权 + 走 bridge 的「浏览本机…」/ 路径输入（聊天卡里浏览器弹不了
+    // 文件选择框，这是卡片里添加本机目录的办法）；「上传」是把内容拷进 Agent 工作区，LLM 用不上
+    // 网页里的聊天卡（跨源 iframe）：Chrome 禁止弹文件选择框，「授权文件夹 / 文件」点了只会报错，
+    // 干脆不放出来，卡片里只留能用的 bridge 入口
+    const inCard = window.parent !== window;
+    if (agentMode) actions.append(...(inCard ? [] : [grantDir, grantFile]), browse, pickFiles, pickDir, pathInput);
+    else actions.append(...(inCard ? [] : [grantDir, grantFile]), browse, pathInput);
     kbPop.appendChild(actions);
+    if (!agentMode) {
+      const hint = document.createElement('div');
+      hint.className = 'om-kb-hint';
+      hint.textContent = currentEngine() === 'llm' && conversations.find((c) => c.id === currentId)?.llmMode !== 'tools'
+        ? 'LLM 问答：单个文件会附进上下文；分析文件夹 / 项目请切到「LLM 任务」。'
+        : 'LLM 任务：模型可列目录、搜索、读取（代码 / Markdown / Word / Excel / PPT / PDF / 图片），修改文件前会先给你看 diff 确认。';
+      hint.textContent += inCard
+        ? ' 在这里用「浏览本机…」或粘贴路径添加（需 bridge 在运行）。'
+        : ' 「授权文件夹 / 文件」用浏览器选择框（无需 bridge）；「浏览本机…」/ 粘贴路径经 bridge 读取。';
+      kbPop.appendChild(hint);
+    }
     // 本地路径存在性复查：不存在的划线提示，不拦截发送
     if (conv) {
       for (const k of entries.filter((x) => x.kind === 'local')) {
@@ -1693,6 +2121,80 @@ export async function createChatView() {
     } finally {
       R.send.disabled = false;
     }
+  }
+
+  // 浏览器授权的本机文件夹 / 文件：句柄存 IndexedDB（kb/store.js），会话里只记元数据。
+  // wsPath：Agent 同步到工作区的落点（knowledge/<名称>，与已有条目重名时加序号）
+  async function addKbHandle(kind) {
+    const conv = conversations.find((c) => c.id === currentId);
+    if (!conv) return;
+    let handles;
+    try {
+      if (kind === 'dir') {
+        if (typeof window.showDirectoryPicker !== 'function') throw new Error('当前浏览器不支持');
+        handles = [await window.showDirectoryPicker({ id: 'om-kb', mode: 'read' })];
+      } else {
+        if (typeof window.showOpenFilePicker !== 'function') throw new Error('当前浏览器不支持');
+        handles = await window.showOpenFilePicker({ id: 'om-kb', multiple: true });
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return; // 用户取消
+      showToast(R.toast, window.parent !== window
+        ? '网页里的聊天卡不能弹出系统文件选择框（Chrome 限制）：请改用「浏览本机…」或粘贴路径（经 bridge），或在侧边栏 / 聊天页（Ctrl+Shift+M）里授权'
+        : `无法打开本机文件选择框：${e.message}`, 'error');
+      return;
+    }
+    const used = new Set((conv.knowledge ?? []).map((k) => k.wsPath).filter(Boolean));
+    const added = [];
+    for (const h of handles) {
+      const id = crypto.randomUUID();
+      await putHandle(id, h);
+      let ws = `knowledge/${sanitizeName(h.name)}`;
+      for (let i = 2; used.has(ws); i++) ws = `knowledge/${sanitizeName(h.name)}-${i}`;
+      used.add(ws);
+      added.push({ id, kind: 'handle', name: h.name, handleKind: h.kind === 'directory' ? 'dir' : 'file', wsPath: ws });
+    }
+    await saveKnowledge(conv, [...(conv.knowledge ?? []), ...added]);
+    const hint = currentEngine() === 'llm' && conv.llmMode !== 'tools' && added.some((a) => a.handleKind === 'dir')
+      ? '（LLM 问答只附带单个文件，分析文件夹请切到「LLM 任务」）' : '';
+    showToast(R.toast, `知识库已添加 ${added.map((a) => a.name).join('、')}${hint}`);
+  }
+
+  // 发送前确认本机授权（此时处在点击 / 回车的用户手势内，可弹浏览器授权提示）。
+  // 浏览器重启后授权会回到「询问」状态，这里一次性补授；被拒的条目本轮跳过
+  async function ensureKbAccess(conv) {
+    const entries = (conv?.knowledge ?? []).filter((k) => k.kind === 'handle');
+    if (!entries.length) return;
+    const { roots, missing } = await loadRoots(entries);
+    const denied = [];
+    for (const r of roots) {
+      if ((await ensurePermission(r.handle, 'read', true)) !== 'granted') denied.push(r.name);
+    }
+    if (missing.length || denied.length) {
+      showToast(R.toast, [
+        missing.length ? `${missing.map((m) => m.name).join('、')} 的授权已失效（浏览器数据被清理），请在知识库里移除后重新添加` : '',
+        denied.length ? `未获得 ${denied.join('、')} 的访问授权，本轮跳过` : '',
+      ].filter(Boolean).join('；'), 'error');
+    }
+  }
+
+  // 可用的本机知识库根；不弹提示。
+  //   浏览器授权的句柄（kind:'handle'）：要有 read 授权；
+  //   bridge 管的本机路径（kind:'local'，「浏览本机…」/ 路径输入添加）：bridge 在线才能读。
+  //     LLM 引擎用 bridge:true 一并带上——聊天卡里浏览器弹不了文件选择框，走 bridge 就没有这个限制；
+  //     Agent 同步（syncKbToWorkspace）只要句柄，bridge 路径 Agent 本来就能直接读，别再拷一份
+  async function grantedRoots(conv, { bridge = false } = {}) {
+    const { roots } = await loadRoots(conv?.knowledge ?? []);
+    const out = [];
+    for (const r of roots) if ((await ensurePermission(r.handle, 'read', false)) === 'granted') out.push(r);
+    if (bridge) {
+      const { roots: br, skipped } = await loadBridgeRoots(agentClient, conv?.knowledge ?? [], new Set(out.map((r) => r.name)));
+      out.push(...br);
+      if (skipped.length) {
+        showToast(R.toast, `知识库里的本机路径本轮不可用：${skipped.map((s) => `${s.name}（${s.reason}）`).join('；')}`, 'error');
+      }
+    }
+    return out;
   }
 
   async function addKbLocalPath(path) {
@@ -1873,8 +2375,7 @@ export async function createChatView() {
     projDirBrowser.selected.clear();
     const conv = conversations.find((c) => c.id === currentId);
     if (conv) {
-      await updateConversation(conv.id, (c) => { c.projectDir = path; });
-      conv.projectDir = path;
+      await patchConversation(conv, (c) => { c.projectDir = path; });
       syncEngineUi();
       showToast(R.toast, `工作目录已绑定 ${path}（下一轮生效）`);
     }
@@ -1891,10 +2392,7 @@ export async function createChatView() {
   }
 
   R.kbBtn.addEventListener('click', () => {
-    if (currentEngine() !== 'agent') {
-      showToast(R.toast, 'LLM 引擎会话不支持知识库', 'error');
-      return;
-    }
+    // 三种引擎共用知识库：LLM 引擎用浏览器授权的本机文件夹 / 文件，bridge 类条目只对 Agent 生效
     kbPop.hidden = !kbPop.hidden;
     if (!kbPop.hidden) {
       renderKbPop();
@@ -2090,7 +2588,19 @@ export async function createChatView() {
           '只输出 Markdown 正文，不要输出其他说明。',
       });
       let md = '';
-      await streamChat({ messages, model: selectedModel(), onDelta: (t) => { md += t; } });
+      let exportErr = '';
+      const sel = selectedLlm();
+      await streamChat({
+        messages,
+        model: sel.model,
+        providerId: sel.providerId,
+        onDelta: (d) => {
+          if (d.error) exportErr = d.error.message || JSON.stringify(d.error);
+          else if (d.text) md += d.text;
+        },
+      });
+      if (exportErr) throw new Error(exportErr);
+      if (!md.trim()) throw new Error('模型没有返回内容');
       const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
       await chrome.downloads.download({ url, filename, saveAs: true });
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
@@ -2173,14 +2683,65 @@ export async function createChatView() {
     return true;
   }
 
+  // 宿主页变了（新开页面续用旧会话 / 同一标签页 SPA 跳转）：网页上下文必须跟着换，
+  // 否则回答一直拿上一个网页当背景（旧版只在会话「还没说过话」时挂一次，之后永不更新，
+  // 只有在顶栏切引擎——顺带新建了会话——才会换到新网页）。
+  //   - 当前会话没说过话：原地换成当前页（当前页没有可用正文就清掉）
+  //   - 当前会话已有消息且绑的是别的页：新建一个绑当前页的对话，原对话保留在列表里
+  //   - 当前会话没绑任何页（用户点 × 移除过 / 来自独立聊天页）：不动，尊重用户选择
+  let uiReady = false; // 初始化完成前不动会话（引擎默认值等还没加载）
+  let hostUrl = ''; // 宿主页最新地址
+  let hostSeen = false;
+  let hostResolve = null;
+  const hostReady = new Promise((res) => { hostResolve = res; setTimeout(res, 800); }); // 宿主没回应也不能卡住启动
+  const pageKey = (u) => {
+    try { const x = new URL(u); return x.origin + x.pathname + x.search; } catch { return String(u || ''); } // 去掉 #hash：锚点跳转不算换页
+  };
+  let reconcileTries = 0;
+  async function reconcileHostCtx() {
+    if (!uiReady || !hostSeen) return;
+    // 流式期间锁定会话切换；发送准备期同理。稍后重试（最多约 90 秒）
+    if (streaming || preparing || translating) {
+      if (reconcileTries++ < 60) setTimeout(reconcileHostCtx, 1500);
+      return;
+    }
+    reconcileTries = 0;
+    const conv = conversations.find((c) => c.id === currentId);
+    if (!conv) return;
+    if (!conv.pageCtx) {
+      if (attachPageCtx(conv)) { await saveConversations(conversations); renderCtxRow(); }
+      return;
+    }
+    if (pageKey(conv.pageCtx.url) === pageKey(hostUrl)) return;
+    if (!conv.items.length) {
+      if (cardCtx) conv.pageCtx = cardCtx; else delete conv.pageCtx;
+      delete conv.pageCtxSent; // agent 会话：新网页上下文要随首条 prompt 再注入一次
+      await saveConversations(conversations);
+      renderCtxRow();
+      return;
+    }
+    const nc = newConv('新对话');
+    attachPageCtx(nc);
+    conversations.unshift(nc);
+    currentId = nc.id;
+    await saveConversations(conversations);
+    renderConvList();
+    renderMessages();
+    syncEngineUi();
+    showToast(R.toast, '页面已变化：已为当前网页新建对话，原对话保留在列表里');
+  }
+
   if (window.parent !== window) {
     window.addEventListener('message', (ev) => {
       if (ev.source !== window.parent || ev.data?.type !== 'om:card-ctx') return;
       const d = ev.data;
-      if (typeof d?.text !== 'string' || d.text.trim().length < 80) return;
-      cardCtx = { title: String(d.title || ''), url: String(d.url || ''), text: d.text.trim() };
-      const conv = conversations.find((c) => c.id === currentId);
-      if (attachPageCtx(conv)) void saveConversations(conversations).then(renderCtxRow);
+      hostUrl = String(d?.url || '');
+      const text = typeof d?.text === 'string' ? d.text.trim() : '';
+      // 当前页没有可用正文（不足 80 字）时必须清空：否则新建对话会挂上上一个网页的正文
+      cardCtx = text.length >= 80 ? { title: String(d.title || ''), url: hostUrl, text } : null;
+      hostSeen = true;
+      hostResolve?.();
+      void reconcileHostCtx();
     });
     try { parent.postMessage({ type: 'om:card-ctx-req' }, '*'); } catch { /* 跨源受限时忽略 */ }
   }
@@ -2341,10 +2902,18 @@ export async function createChatView() {
   syncEngineUi();
   setBusyUi();
   R.input.focus();
-  consumePendingTask();
-  // 面板已打开时，浮窗/右键新写入的任务实时消费（无需重开面板）
+  // 聊天卡：等宿主页上下文回来再对齐会话、再消费 pendingTask——从某个网页触发的动作
+  // （划词翻译 / 总结 / 追问）必须用该网页的上下文，而不是续用会话里上一个网页的
+  (window.parent !== window ? hostReady : Promise.resolve()).then(async () => {
+    uiReady = true;
+    await reconcileHostCtx();
+    consumePendingTask();
+  });
+  // 面板已打开时，浮窗/右键新写入的任务实时消费（无需重开面板）。
+  // 只让可见的实例消费：别的标签页里开着的聊天卡同样在监听 storage.session，不拦的话
+  // 任务会被后台标签页的卡片抢走，用那个页面的上下文回答（再也不是用户当前在看的网页）
   chrome.storage.session?.onChanged?.addListener((changes) => {
-    if (changes.pendingTask?.newValue) consumePendingTask();
+    if (changes.pendingTask?.newValue && document.visibilityState === 'visible') consumePendingTask();
   });
 
   // 多视图同步：侧边栏/聊天页/聊天卡各自持有内存 conversations，任一视图
@@ -2355,8 +2924,9 @@ export async function createChatView() {
     if (area !== 'local' || !changes.conversations) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
-      if (streaming) return;
+      if (streaming || preparing) return;
       const fresh = await loadConversations();
+      if (streaming || preparing) return; // 读存储期间开始了发送：同样放弃替换
       if (JSON.stringify(fresh) === JSON.stringify(conversations)) return;
       conversations = fresh;
       if (!conversations.some((c) => c.id === currentId)) currentId = conversations[0]?.id ?? '';

@@ -61,12 +61,13 @@ export function sanitizeRelPath(relPath) {
     .join('/');
 }
 
-// 上传状态机：begin 开流（wx 独占，重名自动加 “ -2” 后缀）→ chunk 写块 → end 落定。
+// 上传状态机：begin 开流（wx 独占，重名自动加 “ -2” 后缀；overwrite=true 时原名覆盖，
+// 供知识库目录增量同步刷新已变更文件）→ chunk 写块 → end 落定。
 // 超时闲置的上传由 sweep 清理，半成品尽力删除。
 export function createUploadManager({ maxFileBytes = 200 * 1024 * 1024, idleMs = 10 * 60 * 1000 } = {}) {
   const active = new Map(); // uploadId -> { absPath, name, stream, bytes, lastActive }
 
-  function begin({ cwdBase, workspaceId, relPath }) {
+  function begin({ cwdBase, workspaceId, relPath, overwrite = false }) {
     const root = resolveWorkspaceRoot({ cwdBase, workspaceId });
     const clean = sanitizeRelPath(relPath);
     const dir = dirname(join(root, clean));
@@ -76,13 +77,13 @@ export function createUploadManager({ maxFileBytes = 200 * 1024 * 1024, idleMs =
     let absPath = join(dir, name);
     const ext = extname(name);
     const stem = ext ? name.slice(0, -ext.length) : name;
-    for (let i = 2; existsSync(absPath); i++) {
+    for (let i = 2; !overwrite && existsSync(absPath); i++) {
       if (i > 100) throw err('file-exists', '同名文件过多');
       name = ext ? `${stem} -${i}${ext}` : `${stem} -${i}`;
       absPath = join(dir, name);
     }
     const uploadId = 'u' + randomUUID().replace(/-/g, '').slice(0, 12);
-    const stream = createWriteStream(absPath, { flags: 'wx' });
+    const stream = createWriteStream(absPath, { flags: overwrite ? 'w' : 'wx' });
     const up = { absPath, name, stream, bytes: 0, lastActive: Date.now() };
     active.set(uploadId, up);
     // 流出错（磁盘满等）：移出表，后续 op 报 no-upload，等待中的 drain 以 close 兜底

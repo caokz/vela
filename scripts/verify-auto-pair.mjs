@@ -4,9 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const CHROME = findChrome();
 const PORT = 9333;
 const profile = mkdtempSync(join(tmpdir(), 'vela-pair-'));
 const chrome = spawn(CHROME, [
@@ -63,7 +64,7 @@ try {
   const hasTokenInput = await evalInPage(sess, `Boolean(document.querySelector('#om-agent-token'))`);
   const h2 = await evalInPage(sess, `document.querySelector('#om-llm-section')?.textContent`);
   console.log(JSON.stringify({ conn, storedTokenLen: stored, hasTokenInput, h2 }));
-  const ok = conn?.includes('已连接') && stored >= 32 && !hasTokenInput && h2 === '网页翻译';
+  const ok = conn?.includes('已连接') && stored >= 32 && !hasTokenInput && h2 === '模型供应商（API Key）';
   console.log(ok ? 'PASS 自动配对全链路' : 'FAIL ' + JSON.stringify({ conn, stored, hasTokenInput, h2 }));
   process.exitCode = ok ? 0 : 1;
   sess.close(); swSess.close();

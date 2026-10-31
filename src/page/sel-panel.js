@@ -133,6 +133,7 @@ async function run() {
     await streamChat({
       messages: [{ role: 'user', content: buildPrompt(job.act, job.text, settings) }],
       model: provider.models[0],
+      providerId: provider.id, // 激活供应商缺失时落到首个供应商：模型与供应商必须一起传，否则 streamChat 找不到激活项报错
       signal: job.ac.signal,
       onDelta: (d) => {
         if (d.error) {

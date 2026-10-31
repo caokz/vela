@@ -4,7 +4,7 @@
 //   bridge→客户端  {id, ok, result} / {id, ok:false, error:{code,message}} / {type:'event', sessionId, seq, event}
 
 import { createServer as createHttpServer } from 'node:http';
-import { stat, readdir, mkdir, writeFile } from 'node:fs/promises';
+import { stat, readdir, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve, dirname, join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { getAdapter, listAgents } from './agents/registry.js';
@@ -175,7 +175,7 @@ export function startServer({ port, token, hub, bridgeVersion, onShutdown }) {
         if (!target) throw err('bad-params', '缺少 path');
         try {
           const st = await stat(target);
-          return { exists: true, isDirectory: st.isDirectory() };
+          return { exists: true, isDirectory: st.isDirectory(), size: st.size, mtimeMs: st.mtimeMs };
         } catch {
           return { exists: false, isDirectory: false };
         }
@@ -197,13 +197,17 @@ export function startServer({ port, token, hub, bridgeVersion, onShutdown }) {
         // symlink 归类（stat 目标）并行做，避免目录里 junction/链接多时逐个串行
         const entries = (await Promise.all(
           dirents
-            .filter((d) => !d.name.startsWith('.') && !d.name.startsWith('$')) // 隐藏/系统噪音
+            .filter((d) => params.hidden || (!d.name.startsWith('.') && !d.name.startsWith('$'))) // 隐藏/系统噪音（hidden=true 时保留，LLM 文件工具要读 .vela/skills）
             .map(async (d) => {
               let isDirectory = d.isDirectory();
-              if (d.isSymbolicLink()) {
-                try { isDirectory = (await stat(join(abs, d.name))).isDirectory(); } catch { return null; }
+              let st = null;
+              if (d.isSymbolicLink() || params.stat) {
+                try { st = await stat(join(abs, d.name)); isDirectory = st.isDirectory(); } catch { return null; }
               }
-              return { name: d.name, path: join(abs, d.name), isDirectory };
+              return {
+                name: d.name, path: join(abs, d.name), isDirectory,
+                ...(params.stat && st && !isDirectory ? { size: st.size, mtimeMs: st.mtimeMs } : {}),
+              };
             }),
         )).filter(Boolean);
         // Windows 盘根之上没有父目录，上级按钮到顶即困在当前盘：
@@ -212,9 +216,26 @@ export function startServer({ port, token, hub, bridgeVersion, onShutdown }) {
         entries.sort((a, b) => (Number(b.isDirectory) - Number(a.isDirectory)) || a.name.localeCompare(b.name));
         // 盘符钉在最前：localeCompare 把 ':' 当可忽略标点，混排会被中文/字母目录埋掉
         entries.unshift(...drives);
-        const truncated = entries.length > 1000;
-        if (truncated) entries.length = 1000;
+        // 默认 1000 条（目录浏览器 UI 用）；LLM 文件工具传 limit 放宽到 5 万——Java 源码包目录动辄上千个文件，
+        // 截断会让搜索 / 列目录静默漏掉后面的文件
+        const limit = params.limit ? Math.min(50000, Math.max(1, Number(params.limit) || 1000)) : 1000;
+        const truncated = entries.length > limit;
+        if (truncated) entries.length = limit;
         return { path: abs, parent: dirname(abs), entries, truncated };
+      }
+      case 'fs.read': {
+        // LLM 任务模式读知识库里的本机路径（经 bridge，不走浏览器文件选择框）。
+        // 与 fs.list / fs.write 同一信任模型：只绑 127.0.0.1 + 仅扩展 Origin；上限 maxBytes（默认 30MiB，封顶 64MiB）
+        const target = expandTilde(String(params.path || ''));
+        if (!target) throw err('bad-params', '缺少 path');
+        const cap = Math.min(64 * 1024 * 1024, Math.max(1, Number(params.maxBytes) || 30 * 1024 * 1024));
+        const abs = resolve(target);
+        let st;
+        try { st = await stat(abs); } catch (e) { throw err('bad-path', `无法读取：${e.message}`); }
+        if (!st.isFile()) throw err('bad-path', '不是文件');
+        if (st.size > cap) throw err('too-large', `文件 ${st.size} 字节，超过上限 ${cap}`);
+        const buf = await readFile(abs);
+        return { path: abs, size: buf.length, mtimeMs: st.mtimeMs, b64: buf.toString('base64') };
       }
       case 'fs.write': {
         // 一次性小文件写入（会话导出）：path 为绝对/~ 路径，或走与 upload 一致的

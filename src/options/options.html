@@ -9,6 +9,37 @@
 <body>
   <h1>Vela 设置</h1>
 
+  <h2 id="om-llm-section">模型供应商（API Key）</h2>
+  <p class="hint">在这里统一配置 API Key：<b>LLM 问答 / LLM 任务</b>聊天、网页总结、整页翻译、划词翻译 / 解释共用这些供应商。支持任意兼容 OpenAI 或 Anthropic 协议的服务，Base URL 填到版本根（如 <code>https://api.openai.com/v1</code>、<code>https://api.anthropic.com</code>、Ollama 填 <code>http://localhost:11434/v1</code>），保存时会自动归一。勾「默认」的供应商用于翻译、总结与划词；聊天在顶栏模型下拉里可按对话选任一供应商的模型。只用 Agent 引擎聊天时可以不配。</p>
+  <div class="card" id="om-llm-card">
+    <div id="om-providers"></div>
+    <button id="om-add" class="secondary">＋ 添加供应商</button>
+
+    <h3>全局参数</h3>
+    <label>System Prompt（可空）<textarea id="om-system" rows="3" placeholder="留空则不发送 system"></textarea></label>
+    <div class="row">
+      <label>temperature <input id="om-temp" type="number" step="0.1" min="0" max="2" placeholder="留空=不发送" /></label>
+      <label>max_tokens <input id="om-maxtok" type="number" step="1" min="0" placeholder="0=不发送（Anthropic 默认 4096）" /></label>
+    </div>
+    <p class="hint">部分新模型（如 OpenAI o 系 / GPT-5 系）不接受 temperature 或 max_tokens，留空最稳。</p>
+
+  </div>
+
+  <h2>聊天引擎</h2>
+  <div class="card">
+    <div class="row">
+      <label>新对话默认引擎
+        <select id="om-chat-engine">
+          <option value="agent">Agent（本机 Claude Code 等）</option>
+          <option value="llm">LLM 问答（直连上方供应商）</option>
+          <option value="llm-tools">LLM 任务（可调用浏览器工具）</option>
+        </select>
+      </label>
+      <label>任务模式单轮最多工具步数 <input id="om-chat-maxsteps" type="number" min="1" max="50" step="1" /></label>
+    </div>
+    <p class="hint">聊天顶栏可按对话切换引擎，切换后作为新对话默认值记住。LLM 问答 / LLM 任务直接调用上方「模型供应商」里配置的 API Key，无需 bridge。任务模式下模型可读取当前网页、选中内容、标签页与网址正文；打开网页、联网读取、下载文件等操作会先弹卡确认。</p>
+  </div>
+
   <h2>本地 Agent（聊天）</h2>
   <div class="card">
     <div class="row">
@@ -44,25 +75,12 @@
     <div class="row">
       <label class="grow">工作基础目录 <input id="om-agent-basedir" type="text" placeholder="~/.vela-bridge/workspaces" /></label>
     </div>
-    <p class="hint">每个对话自动在基础目录下建独立子目录（<code>&lt;基础目录&gt;/&lt;对话 id&gt;</code>）作为 agent 工作区，知识库与附件也存放在该子目录内。支持 <code>~</code>。权限模式是 agent 工具调用的审批策略：每步审批对每个工具弹卡等待允许；自动接受编辑放行文件编辑、其余仍审批；自动放行不再弹卡（agent 可直接执行任意命令，仅限可信环境）。聊天页输入框下方可按会话覆盖权限模式与模型。先启动 bridge：<code>cd bridge && npm i && node index.js</code>；token 无需手动设置——扩展与 bridge 首次握手自动配对。检测列出本机已装的 agent 及登录态；未登录时按提示的命令先完成登录。只用 Agent 引擎聊天时，无需配置下面的 LLM 供应商。</p>
+    <p class="hint">每个对话自动在基础目录下建独立子目录（<code>&lt;基础目录&gt;/&lt;对话 id&gt;</code>）作为 agent 工作区，知识库与附件也存放在该子目录内。支持 <code>~</code>。权限模式是 agent 工具调用的审批策略：每步审批对每个工具弹卡等待允许；自动接受编辑放行文件编辑、其余仍审批；自动放行不再弹卡（agent 可直接执行任意命令，仅限可信环境）。聊天页输入框下方可按会话覆盖权限模式与模型。先启动 bridge：<code>cd bridge && npm i && node index.js</code>；token 无需手动设置——扩展与 bridge 首次握手自动配对。检测列出本机已装的 agent 及登录态；未登录时按提示的命令先完成登录。只用 Agent 引擎聊天时，无需配置上方的模型供应商。</p>
   </div>
 
-  <h2 id="om-llm-section">网页翻译</h2>
-  <p class="hint">配置兼容 OpenAI 或 Anthropic 协议的任意供应商。Base URL 填到版本根（如 <code>https://api.openai.com/v1</code>、<code>https://api.anthropic.com</code>、Ollama 填 <code>http://localhost:11434/v1</code>），保存时会自动归一。翻译的模型 / 语言 / 模式也可将鼠标悬停在页面浮窗的「翻译此页」按钮上就地切换。</p>
-
-  <div class="card" id="om-llm-card">
-    <div id="om-providers"></div>
-    <button id="om-add" class="secondary">＋ 添加供应商</button>
-
-    <h3>全局参数</h3>
-    <label>System Prompt（可空）<textarea id="om-system" rows="3" placeholder="留空则不发送 system"></textarea></label>
-    <div class="row">
-      <label>temperature <input id="om-temp" type="number" step="0.1" min="0" max="2" placeholder="留空=不发送" /></label>
-      <label>max_tokens <input id="om-maxtok" type="number" step="1" min="0" placeholder="0=不发送（Anthropic 默认 4096）" /></label>
-    </div>
-    <p class="hint">部分新模型（如 OpenAI o 系 / GPT-5 系）不接受 temperature 或 max_tokens，留空最稳。</p>
-
-    <h3>翻译参数</h3>
+  <h2>网页翻译</h2>
+  <p class="hint">翻译使用上方「默认」供应商。翻译的模型 / 语言 / 模式也可将鼠标悬停在页面浮窗的「翻译此页」按钮上就地切换。</p>
+  <div class="card">
     <div class="row">
       <label>目标语言
         <select id="om-tx-lang">

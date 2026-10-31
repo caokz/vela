@@ -5,15 +5,17 @@
 //   VELA_CHROME=<chrome.exe> 可换浏览器（默认 Playwright Chromium，可指真实安装的 Chrome）
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const ZIP = process.argv[2] ?? join(EXT_ROOT, 'dist', 'vela-0.7.10.zip');
-const CHROME = process.env.VELA_CHROME ?? join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const WANT_VER = JSON.parse(readFileSync(join(EXT_ROOT, 'manifest.json'), 'utf8')).version; // 产物版本跟随 manifest
+const ZIP = process.argv[2] ?? join(EXT_ROOT, 'dist', `vela-${WANT_VER}.zip`);
+const CHROME = findChrome();
 const REAL = Boolean(process.env.VELA_CHROME); // 真实 Chrome 137+：--load-extension 已移除，走 CDP loadUnpacked
 const PORT = 9352;
 const WEB = 39317;
@@ -128,7 +130,7 @@ try {
   // 先探测扩展是否已在（Playwright Chromium 认 --load-extension），不在再走 loadUnpacked + 重载
   await sleep(500); // 等事件把 isolated context 收全
   let extVer = await sess.evalIsolated(`chrome.runtime.getManifest().version`);
-  if (extVer !== '0.7.10' && REAL) {
+  if (extVer !== WANT_VER && REAL) {
     const ver = await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json();
     const brws = await connect(ver.webSocketDebuggerUrl);
     const loaded = await brws.send('Extensions.loadUnpacked', { path: extDir });
@@ -136,7 +138,7 @@ try {
     console.log('已通过 CDP loadUnpacked 装载产物');
     brws.close();
     // SW 启动 + registerContentScripts 需要时间；reload 后重试取 isolated context
-    for (let i = 0; i < 5 && extVer !== '0.7.10'; i++) {
+    for (let i = 0; i < 5 && extVer !== WANT_VER; i++) {
       await sleep(1500);
       await sess.send('Page.reload');
       await sleep(2000);
@@ -144,7 +146,7 @@ try {
       console.log(`装载重试 ${i + 1}: 版本=${extVer} contexts=${sess.contexts.size}`);
     }
   }
-  check('加载的是打包产物扩展', extVer === '0.7.10', `版本=${extVer}`);
+  check('加载的是打包产物扩展', extVer === WANT_VER, `版本=${extVer}`);
   console.log('产物文件数:', readdirSync(extDir).length);
 
   // 1) 真实拖选 → 工具条 → 真实点高亮
@@ -216,7 +218,7 @@ try {
   check('悬停胶囊挂出', pill);
   if (pill) {
     const t = await evalInPage(sess, `document.getElementById('om-sel-hlbtn-host').title`);
-    check('胶囊 title 带版本标记', t === 'Vela 高亮 v0.7.10', String(t));
+    check('胶囊 title 带版本标记', t === `Vela 高亮 v${WANT_VER}`, String(t));
   }
 
   sess.close();

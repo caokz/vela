@@ -18,6 +18,8 @@ export const DEFAULT_SETTINGS = {
   activeProviderId: '',
   defaults: { temperature: null, maxTokens: 0, systemPrompt: '' },
   agentBridge: { url: 'ws://127.0.0.1:39217', token: '', defaultAgentId: '', baseDir: '~/.vela-bridge/workspaces', permissionMode: 'default', model: '' },
+  // 聊天：新会话默认引擎（agent | llm | llm-tools，顶栏切换时记住）；LLM 任务模式单轮最多工具步数
+  chat: { defaultEngine: 'agent', toolMaxSteps: 12 },
   translation: {
     targetLang: 'zh-CN',
     mode: 'bilingual', // bilingual | immersive
@@ -68,6 +70,7 @@ export async function loadSettings() {
     ...saved,
     defaults: { ...DEFAULT_SETTINGS.defaults, ...(saved.defaults ?? {}) },
     agentBridge: { ...DEFAULT_SETTINGS.agentBridge, ...(saved.agentBridge ?? {}) },
+    chat: { ...DEFAULT_SETTINGS.chat, ...(saved.chat ?? {}) },
     translation,
     quickActions: Array.isArray(saved.quickActions) && saved.quickActions.length
       ? saved.quickActions
@@ -84,15 +87,24 @@ export async function getActiveProvider() {
   return s.providers.find((p) => p.id === s.activeProviderId) ?? null;
 }
 
-// 顶层流式聊天入口：解析激活供应商 → 选适配器 → 注入全局参数。
+// 顶层流式聊天入口：解析供应商 → 选适配器 → 注入全局参数。
+// providerId：会话固定的供应商（模型下拉存 [providerId, model]）；传了就精确查找，
+// 找不到报错而不静默回退到别家——否则可能拿 A 家的模型名去请求 B 家。
+// 不传（翻译/总结等页面功能）沿用设置页激活的供应商。
 // overrides：调用级参数覆盖（如翻译批次强制 temperature 0），优先于设置页默认值。
-export async function streamChat({ messages, model, signal, onDelta, overrides }) {
-  const provider = await getActiveProvider();
+// tools：工具定义（LLM 任务模式），收尾增量带 toolCalls。
+export async function streamChat({ messages, model, providerId, signal, onDelta, overrides, tools }) {
+  const settings = await loadSettings();
+  const provider = providerId
+    ? settings.providers.find((p) => p.id === providerId) ?? null
+    : settings.providers.find((p) => p.id === settings.activeProviderId) ?? null;
   if (!provider) {
-    onDelta({ text: '', finished: true, error: { message: '未配置供应商，请先打开设置页添加' } });
+    const message = providerId && settings.providers.length
+      ? '本会话使用的供应商已在设置页删除，请在顶栏重新选择模型'
+      : '未配置供应商，请先打开设置页添加';
+    onDelta({ text: '', finished: true, error: { message } });
     return;
   }
-  const settings = await loadSettings();
   const adapter = getAdapter(provider.kind);
   const usedModel = model || provider.models[0] || '';
   if (!usedModel) {
@@ -112,6 +124,7 @@ export async function streamChat({ messages, model, signal, onDelta, overrides }
       signal,
       onDelta,
       params,
+      tools,
     });
   } catch (err) {
     const msg = (await import('./sse.js')).httpErrorMessage(err);

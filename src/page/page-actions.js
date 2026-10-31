@@ -13,7 +13,8 @@ const NON_INJECTABLE = /^(chrome|edge|about|devtools|view-source|chrome-extensio
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab || tab.id == null) throw new Error('找不到活动标签页');
-  if (NON_INJECTABLE.test(tab.url || '')) throw new Error('此页面（浏览器内置页）无法注入脚本');
+  // 无 tabs 权限时扩展页/内置页的 url 为 null：按不可注入处理，而不是放过去等注入报错
+  if (!/^(https?|file):/i.test(tab.url || '') || NON_INJECTABLE.test(tab.url)) throw new Error('此页面（浏览器内置页）无法注入脚本');
   return tab;
 }
 

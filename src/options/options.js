@@ -118,6 +118,8 @@ let txLangTouched = false;
 let txModeTouched = false;
 $('#om-tx-lang').addEventListener('change', () => { txLangTouched = true; });
 $('#om-tx-mode').addEventListener('change', () => { txModeTouched = true; });
+let chatEngineTouched = false;
+$('#om-chat-engine').addEventListener('change', () => { chatEngineTouched = true; });
 
 // ---- 本地 Agent bridge ----
 const agentResult = $('#om-agent-result');
@@ -298,6 +300,12 @@ $('#om-save').addEventListener('click', async () => {
       systemPrompt: $('#om-system').value,
     },
     agentBridge: { ...curSettings.agentBridge, ...readAgentBridge() },
+    chat: {
+      ...curSettings.chat,
+      // 聊天顶栏切引擎也会写 defaultEngine：本页没动过就保留存储里的最新值
+      defaultEngine: chatEngineTouched ? $('#om-chat-engine').value : curSettings.chat.defaultEngine,
+      toolMaxSteps: Math.min(50, Math.max(1, Number($('#om-chat-maxsteps').value || 12))),
+    },
     translation: {
       targetLang: txLangTouched ? $('#om-tx-lang').value : curSettings.translation.targetLang,
       mode: txModeTouched ? $('#om-tx-mode').value : curSettings.translation.mode,
@@ -378,4 +386,6 @@ $('#om-tx-mode').value = settings.translation.mode;
 $('#om-tx-maxblocks').value = settings.translation.maxBlocks;
 $('#om-tx-maxchars').value = settings.translation.maxChars;
 $('#om-tx-batchblocks').value = settings.translation.batchBlocks;
+$('#om-chat-engine').value = settings.chat.defaultEngine;
+$('#om-chat-maxsteps').value = settings.chat.toolMaxSteps;
 for (const qa of settings.quickActions) qaList.appendChild(qaRow(structuredClone(qa)));

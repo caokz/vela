@@ -8,12 +8,29 @@
 (() => {
   'use strict';
   if (window.__omSelPopup) {
-    // 扩展重载后旧脚本上下文失效：工具条残留但收不到消息，检测后摘掉重铺
+    // 扩展重载后旧脚本上下文失效：工具条残留但收不到消息，检测后摘掉重铺。
+    // 判活：失效上下文里 chrome.runtime.id 是 undefined 而不是抛错（旧版 try/catch 永远判活，
+    // 补注直接 return，旧工具条一直残留、动作报「扩展未响应」）；隔离世界复用时
+    // chrome.runtime 也可能换成新对象，旧实例记下的 runtime 引用对不上同样视为失效
     let alive = false;
-    try { void chrome.runtime.id; alive = true; } catch { /* 上下文已失效 */ }
+    try { alive = !!chrome.runtime?.id && window.__omSelPopup.rt === chrome.runtime; } catch { /* 上下文已失效 */ }
     if (alive) return;
+    try { window.__omSelPopup.dispose?.(); } catch { /* 旧版本无 dispose */ }
     window.__omSelPopup.host?.remove();
     window.__omSelPopup = null;
+  }
+
+  // 页面级监听统一挂 AbortSignal，并在每次触发时自检：扩展重载/更新后新实例跑在新的隔离世界，
+  // 看不到也摘不掉本实例；本实例的上下文已失效（chrome.runtime.id 变 undefined）时自行注销，
+  // 否则旧监听继续在每次划词时弹出一个点了只报「扩展未响应」的死工具条，与新工具条叠在一起
+  const lifetime = new AbortController();
+  const extAlive = () => { try { return !!chrome.runtime?.id; } catch { return false; } };
+  function on(target, type, fn, opt) {
+    const o = typeof opt === 'boolean' ? { capture: opt } : { ...(opt || {}) };
+    target.addEventListener(type, (e) => {
+      if (!extAlive()) { api.dispose(); return; }
+      fn(e);
+    }, { ...o, signal: lifetime.signal });
   }
 
   const HOST_ID = 'om-sel-host';
@@ -233,9 +250,20 @@
       if (!r0.width || !r0.height) { fail(`span 尺寸为 ${Math.round(r0.width)}x${Math.round(r0.height)}（display=${cs.display}）`); return; }
       const inlineOk = norm(span.style.backgroundColor) === wantBg() || norm(span.style.backgroundImage).includes(wantBg());
       if (norm(bg) !== norm('rgba(255, 222, 89, 0.6)')) { fail(`computed 背景=${bg}（期望 rgba(255, 222, 89, 0.6)），内联样式${inlineOk ? '在' : '丢失'} — 页面或其他扩展覆盖了颜色`); return; }
-      const hit = document.elementFromPoint(r0.left + r0.width / 2, r0.top + r0.height / 2);
-      const covered = hit !== span && hit?.closest?.('.om-hl') !== span && !hit?.closest?.('[id^="om-"]');
-      if (covered) { fail(`被 ${hit ? hit.tagName + (hit.id ? '#' + hit.id : '') : 'null'} 遮挡，颜色画了但看不见`); return; }
+      // 遮挡判定按行盒逐个取中心点，任一行盒命中本高亮即算可见。不能取外接矩形中心：
+      // 跨行高亮（第 1 行后半 + 第 2 行前半）的外接矩形中心落在段落里未高亮的文字上，
+      // 命中的是父级 <p>，会误报「被 P 遮挡」（github README 上的真实报障）
+      // 命中链跳过本扩展自己的浮层（悬停胶囊挂在首行下方，正好压在第 2 行上），取其下第一个页面元素
+      const ownLayer = (el) => !!el?.closest?.('[id^="om-"]') && !el.closest('.om-hl');
+      let hit = null;
+      let visible = false;
+      for (const rc of span.getClientRects()) {
+        if (rc.width < 2 || rc.height < 2) continue;
+        const el = document.elementsFromPoint(rc.left + rc.width / 2, rc.top + rc.height / 2).find((x) => !ownLayer(x));
+        if (el && (el === span || el.closest('.om-hl') === span)) { visible = true; break; }
+        hit = hit || el;
+      }
+      if (!visible && hit) { fail(`被 ${hit.tagName + (hit.id ? '#' + hit.id : '')} 遮挡，颜色画了但看不见`); return; }
       if (!inlineOk) { fail('内联底色丢失，仅剩样式表链路'); return; }
       try { console.info(`[Vela] 高亮已应用 v${VER} | 底色=${bg} 矩形=${Math.round(r0.width)}x${Math.round(r0.height)} 位置=(${Math.round(r0.left)},${Math.round(r0.top)})`); } catch { /* 页面禁 console */ }
       // 像素终验（0.7.10）：把「样式算了」升级成「屏幕画了」。截屏由 SW 代做（内容脚本
@@ -343,7 +371,16 @@
   let root = null;
   const api = {
     host: null,
+    rt: chrome.runtime, // 补注时判断本实例是否属于当前扩展上下文
     refresh: () => show(), // refresh 供测试与程序化触发
+    // 被新实例替换：摘掉页面级监听与本实例挂出的全部 UI（已生成的高亮 span 保留）
+    dispose: () => {
+      lifetime.abort();
+      destroy();
+      hideCodeBtn();
+      hideHlBtn();
+      closePanel();
+    },
     // 调试口（隔离世界可见）：测试/排障用
     hlState: () => ({ pill: !!hlBtnHost, span: !!hlBtnSpan, hl: document.querySelectorAll('.om-hl').length }),
     showHlOnFirst: () => { const s = document.querySelector('.om-hl'); if (s) showHlBtn(s); return !!hlBtnHost; },
@@ -540,7 +577,7 @@
     if (frame && maxH > 0) frame.style.height = `${maxH}px`;
   }
 
-  window.addEventListener('message', (ev) => {
+  on(window, 'message', (ev) => {
     if (!panelHost || ev.source !== panelFrame()?.contentWindow) return;
     const d = ev.data;
     if (!d || typeof d !== 'object') return;
@@ -654,7 +691,7 @@
   }
 
   // 悬停 <pre> 出胶囊；移出（胶囊或代码块之外）即收。合成 mouseover 也能触发（测试用）
-  document.addEventListener('mouseover', (e) => {
+  on(document, 'mouseover', (e) => {
     if (cbtnHost && e.composedPath().includes(cbtnHost)) return; // 悬停在胶囊上：保持
     const pre = e.target?.closest?.('pre') || null;
     if (pre === cbtnPre) return;
@@ -665,9 +702,12 @@
   // ---------- 高亮区悬停胶囊（Monica 式：换色 / 复制 / AI 提问 / 删除） ----------
   let hlBtnHost = null;
   let hlBtnSpan = null;
-  let hlShowTs = 0; // 胶囊挂出时间：挂出后短窗口内忽略 mouseover 收起
+  let hlShowTs = 0; // 胶囊挂出时间：刚挂出的即时反馈胶囊延时收得更久
+  let hlHideTimer = 0; // 移出胶囊/高亮区后的延时收起
 
   function hideHlBtn() {
+    clearTimeout(hlHideTimer);
+    hlHideTimer = 0;
     hlBtnHost?.remove();
     hlBtnHost = null;
     hlBtnSpan = null;
@@ -793,55 +833,65 @@
     hlShowTs = Date.now();
   }
 
-  // 悬停 .om-hl 出胶囊；移出（胶囊或高亮区之外）即收。合成 mouseover 也能触发（测试用）。
-  // 宽限期：点高亮后本页 DOM 变动（工具条销毁/高亮插入）会触发 Blink 重算 hover，
-  // 向光标下的 <p> 等补发 mouseover，把刚挂出的即时反馈胶囊瞬间收掉。
-  // 挂出后 250ms 内的 mouseover 不立即收，改为到期按光标实际位置复核：仍在胶囊/高亮上则保持，否则收。
-  let hlGraceTimer = 0;
-  let lastMx = -1;
-  let lastMy = -1;
-  document.addEventListener('mouseover', (e) => {
-    lastMx = e.clientX; lastMy = e.clientY;
+  // 悬停 .om-hl 出胶囊；移出（胶囊或高亮区之外）延时收，期间移回胶囊/高亮区即取消。
+  // 合成 mouseover 也能触发（测试用）。
+  // 延时收而不是立即收：①工具条在选区上方、胶囊在高亮下方，鼠标从工具条移向胶囊必然
+  // 先划过正文（<p> 的 mouseover），立即收会让胶囊永远够不着；②点高亮后工具条销毁，
+  // Blink 重算 hover 向光标下元素补发 mouseover，旧版 250ms 宽限期到点按光标位置复核——
+  // 光标仍停在已销毁的工具条处、既不在胶囊也不在高亮上，即时反馈胶囊约 260ms 必被收掉。
+  // 刚挂出的即时反馈胶囊给 1.5s 够到，之后的悬停胶囊 300ms
+  function cancelHlHide() {
+    clearTimeout(hlHideTimer);
+    hlHideTimer = 0;
+  }
+  function scheduleHlHide(ms) {
+    if (hlHideTimer) return; // 已在倒计时：持续划过正文不续期
+    hlHideTimer = setTimeout(() => {
+      hlHideTimer = 0;
+      hideHlBtn();
+    }, ms);
+  }
+  on(document, 'mouseover', (e) => {
     const path = e.composedPath();
-    if (hlBtnHost && path.includes(hlBtnHost)) return; // 悬停在胶囊上：保持
+    if (hlBtnHost && path.includes(hlBtnHost)) { cancelHlHide(); return; } // 悬停在胶囊上：保持
     const hl = e.target?.closest?.('.om-hl') || null;
-    if (hl === hlBtnSpan) return;
-    if (hlBtnHost && Date.now() - hlShowTs < 250) {
-      clearTimeout(hlGraceTimer);
-      hlGraceTimer = setTimeout(() => {
-        if (!hlBtnHost) return;
-        const r = hlBtnHost.getBoundingClientRect();
-        const onPill = lastMx >= r.left && lastMx <= r.right && lastMy >= r.top && lastMy <= r.bottom;
-        const el = lastMx >= 0 ? document.elementFromPoint(lastMx, lastMy) : null;
-        const onHl = el?.closest?.('.om-hl') === hlBtnSpan;
-        if (!onPill && !onHl) hideHlBtn();
-      }, 260);
+    if (hl && hl === hlBtnSpan) { cancelHlHide(); return; }
+    if (hl) {
+      hideHlBtn();
+      showHlBtn(hl);
       return;
     }
-    hideHlBtn();
-    if (hl) showHlBtn(hl);
+    if (hlBtnHost) scheduleHlHide(Date.now() - hlShowTs < 1500 ? 1500 : 300);
   });
 
   // ---------- 事件接线 ----------
   // 弹出时机：mouseup（拖选/双击）与 keyup（Shift+方向键扩选）。
   // selectionchange 只用来收：选区清空（点了别处/全选取消）立即隐藏
-  document.addEventListener('mouseup', (e) => {
+  on(document, 'mouseup', (e) => {
     if (host && e.composedPath().includes(host)) return; // 在工具条上松开不重摆
     setTimeout(show, 0); // 双击的第二次 click 先于 selection 定型，延迟到本轮事件收尾
   });
-  document.addEventListener('keyup', () => show());
-  document.addEventListener('selectionchange', () => {
+  on(document, 'keyup', () => show());
+  on(document, 'selectionchange', () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !String(sel).trim()) destroy();
   });
   // 工具条锚在视口坐标：滚动 / 缩放后位置失真，直接收（重新选中会再弹）。
-  // 面板自身限高滚动，滚动时保持（Monica 同款行为）
-  window.addEventListener('scroll', () => { destroy(); hideCodeBtn(); hideHlBtn(); }, true);
-  window.addEventListener('resize', () => { destroy(); hideCodeBtn(); hideHlBtn(); });
-  document.addEventListener('keydown', (e) => {
+  // 只认会挪动锚点的滚动：页面本身或锚点的某个祖先容器。页面里无关的滚动容器（轮播、
+  // 自动滚动的目录/聊天挂件、跑马灯）持续发 scroll，旧版一律收起，工具条刚弹出就消失
+  const scrollMoves = (t, el) => !!el && (t === document || t === window || t === document.documentElement
+    || t === document.body || (typeof t?.contains === 'function' && t.contains(el)));
+  on(window, 'scroll', (e) => {
+    const t = e.target;
+    if (host && scrollMoves(t, lastState?.anchorEl)) destroy();
+    if (cbtnHost && scrollMoves(t, cbtnPre)) hideCodeBtn();
+    if (hlBtnHost && scrollMoves(t, hlBtnSpan)) hideHlBtn();
+  }, true);
+  on(window, 'resize', () => { destroy(); hideCodeBtn(); hideHlBtn(); });
+  on(document, 'keydown', (e) => {
     if (e.key === 'Escape') { destroy(); hideCodeBtn(); hideHlBtn(); closePanel(); }
   });
-  document.addEventListener('pointerdown', (e) => {
+  on(document, 'pointerdown', (e) => {
     const path = e.composedPath();
     if (host && !path.includes(host)) destroy();
     if (cbtnHost && !path.includes(cbtnHost)) hideCodeBtn();

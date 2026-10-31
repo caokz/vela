@@ -36,26 +36,21 @@
   // ---------- 块发现（与总结提取互不依赖；翻译调度按视口按需上报） ----------
   // label：文档站侧栏（Hugo book / Antora 等）的折叠章节标题放在 <label> 里，
   // 不收录则整条侧栏目录永远进不了翻译；表单 label 通常包住 input，会被子树检查拒掉
-  const SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, td, figcaption, dd, dt, label';
+  // [role=…]：x.ai / Notion 式对比表不用 <table>，是 div + ARIA 表格角色
+  // （rowheader / columnheader / cell，网格表格为 gridcell）——不收录则整张表进不了翻译；
+  // 纯图标格子无文本，会被文本过滤自然淘汰
+  const SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, td, th, '
+    + '[role="rowheader"], [role="columnheader"], [role="cell"], [role="gridcell"], '
+    + 'figcaption, dd, dt, label';
   // 子树含这些元素 → 整块跳过。不含 <a>/<code>/<kbd>/<samp>：文档站标题内嵌锚点链接、
   // 正文/表格单元格混行内代码（选项名、参数值）都是正常可译内容，行内代码由 prompt 保持原样；
   // 代码块已由 pre 覆盖；沉浸模式整块替换为纯译文，行内标记按 innerHTML 快照在还原时恢复。
+  // 不含 <svg>：图标（导航链接的 chevron、按钮里的图形）innerText 无文本，不是拒收理由——
+  // 含图标的链接一旦被拒，顶栏导航整排都进不了翻译。
   const SKIP_TAGS = new Set([
-    'script', 'style', 'noscript', 'template', 'iframe', 'svg', 'canvas', 'pre',
+    'script', 'style', 'noscript', 'template', 'iframe', 'canvas', 'pre',
     'button', 'select', 'textarea', 'sup', 'sub', 'form', 'input',
   ]);
-  // 侧边导航/目录（nav/aside）是用户要译的内容，只跳过页眉横幅与页脚
-  const SKIP_ANCESTORS = new Set(['header', 'footer']);
-
-  function inSkippedAncestor(node) {
-    for (let a = node.parentElement; a && a !== document.body; a = a.parentElement) {
-      const tag = a.tagName.toLowerCase();
-      if (SKIP_ANCESTORS.has(tag)) return true;
-      const role = a.getAttribute?.('role');
-      if (role === 'banner' || role === 'contentinfo') return true;
-    }
-    return false;
-  }
 
   // 标识符 / 配置项 / 路径 / 键值对：无空格或 key=value 形态的纯 ASCII 机器文本，不翻译
   function looksLikeConfig(t) {
@@ -68,10 +63,13 @@
     if (node.getAttribute('data-om-tx') != null) return null; // 已收录
     if (node.closest('.om-tx-dst')) return null; // 自己插入的译文节点不收录，防重复翻译
     if (SKIP_TAGS.has(node.tagName.toLowerCase())) return null;
+    // 标题豁免：手风琴问题头（WAI-ARIA 标准模式 h3 > button > span 问题文本 + svg 加号）
+    // 会被子树检查整块拒掉，FAQ 问题永远进不了翻译；h1-h6 容许内嵌 button
+    const lax = /^h[1-6]$/i.test(node.tagName);
     for (const d of node.querySelectorAll('*')) {
-      if (SKIP_TAGS.has(d.tagName.toLowerCase())) return null; // 子树含代码/结构元素
+      const t = d.tagName.toLowerCase();
+      if (SKIP_TAGS.has(t) && !(lax && t === 'button')) return null; // 子树含代码/结构元素
     }
-    if (inSkippedAncestor(node)) return null;
     // 可见性不在收录时判（见 ensureObserver）：折叠菜单/隐藏帧收录时不可见，展开后仍要能译
     const raw = (node.innerText || '').replace(/\s+/g, ' ').trim();
     if (raw.length < 2) return null;
@@ -103,6 +101,23 @@
     // 局部重扫时不能做全局 leaf-most 过滤（会误收祖先），只看无已收录块后代的节点
     for (const n of all) {
       if (n.querySelector(SELECTOR)) continue;
+      // li 的全部文本都来自唯一子链接（顶栏/目录导航的标准形态）时让 <a> 自己当块
+      // （第二遍兜底收走）：沉浸模式 li 整块 textContent 替换会把链接抹掉，导航就点不动了
+      if (n.tagName === 'LI') {
+        const links = n.querySelectorAll('a');
+        if (links.length === 1
+          && (links[0].innerText || '').replace(/\s+/g, ' ').trim() === (n.innerText || '').replace(/\s+/g, ' ').trim()) continue;
+      }
+      adopt(n);
+    }
+    // 第二遍兜底：主选择器盖不住的行内文本（页脚/顶栏导航链接、列标题 span、面包屑）。
+    // a/span 不能进主选择器——leaf-most 过滤会把「带内联链接的正文段落」拆成只译链接。
+    // 祖先或后代有已收录块的都跳过（悬停大菜单 a 内含 span 标题 + p 描述，重复收会双译）；
+    // 按钮内文本是 UI 控件不译，选项卡标签（role=tab，如 Individual/Teams/API）例外
+    for (const n of rootNode.querySelectorAll('a, span')) {
+      if (n.closest('[data-om-tx]') || n.querySelector('[data-om-tx]')) continue;
+      const ctrl = n.closest('button, [role="button"]');
+      if (ctrl && ctrl.getAttribute('role') !== 'tab') continue;
       adopt(n);
     }
   }
@@ -136,10 +151,11 @@
           state.observer?.unobserve(en.target);
           continue;
         }
-        // 收录时不可见的块（折叠侧栏子项、轮播隐藏帧）在展开获得几何量后 IO 才回调，
-        // 此时可见性校验通过才上报；仍不可见（opacity:0 等）则保持观察，滚动再触发
-        if (typeof en.target.checkVisibility === 'function'
-          && !en.target.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+        // 可见性只卡「未渲染」（display:none）：IO 只在几何量变化时回调，opacity/visibility
+        // 变化不会再触发——淡入弹层/悬停菜单若因 opacity:0 被扣下，就永远等不到第二次回调
+        // （弹框弹出后不自动翻译即此）。淡入中的块直接上报，译文落在透明容器里，展开即见；
+        // display:none 的块没有几何量本就进不了回调，展开后 IO 自然补发
+        if (typeof en.target.checkVisibility === 'function' && !en.target.checkVisibility()) continue;
         state.observer?.unobserve(en.target);
         scheduleNeed(id, rec.text, rec.node);
       }
@@ -206,10 +222,14 @@
     let dst = document.querySelector(`[data-om-tx-dst='${id}']`) || node.parentElement?.querySelector(`[data-om-tx-dst='${id}']`);
     for (const n of node.querySelectorAll(`[data-om-tx-dst='${id}']`)) dst = n;
     if (!dst) {
-      dst = document.createElement(node.tagName === 'TD' || node.tagName === 'LI' ? 'div' : node.tagName === 'BLOCKQUOTE' ? 'p' : 'div');
+      dst = document.createElement(node.tagName === 'TD' || node.tagName === 'TH' || node.tagName === 'LI' ? 'div' : node.tagName === 'BLOCKQUOTE' ? 'p' : 'div');
       dst.className = 'om-tx-dst';
       dst.setAttribute('data-om-tx-dst', String(id));
-      if (node.tagName === 'TD' || node.tagName === 'LI' || node.tagName === 'BLOCKQUOTE') {
+      // 格子型宿主（td/th/li/blockquote、ARIA 表格格子）译文放进格子内部，其余插为兄弟——
+      // 表格行/ARIA 行是表格或网格布局，译文插成兄弟会多出一列、把整行挤乱
+      const role = node.getAttribute('role');
+      if (node.tagName === 'TD' || node.tagName === 'TH' || node.tagName === 'LI' || node.tagName === 'BLOCKQUOTE'
+        || role === 'cell' || role === 'gridcell' || role === 'rowheader' || role === 'columnheader') {
         node.appendChild(dst);
       } else {
         node.parentElement?.insertBefore(dst, node.nextSibling);

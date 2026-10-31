@@ -5,9 +5,10 @@ import { mkdtempSync, rmSync, readFileSync, rmSync as rm } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const CHROME = findChrome();
 const PORT = 9333;
 const profile = mkdtempSync(join(tmpdir(), 'vela-exp-'));
 const chrome = spawn(CHROME, [

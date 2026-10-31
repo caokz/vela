@@ -2,14 +2,14 @@
 // 零依赖（Node 22+ 内置 WebSocket）。默认使用 Playwright Chromium（支持 --load-extension）。
 // 用法：node scripts/smoke-test.mjs [chrome.exe 路径]
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.argv[2]
-  || join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const CHROME = process.argv[2] || findChrome();
 const PORT = 9333;
 
 const profile = mkdtempSync(join(tmpdir(), 'vela-smoke-'));
@@ -113,7 +113,8 @@ try {
   })()`).then((s) => (typeof s === 'string' ? JSON.parse(s) : {}));
   check('manifest scripting 权限', manifest.perms.includes('scripting'), manifest.perms.join(','));
   check('manifest <all_urls> 授权', manifest.hosts?.includes('<all_urls>') === true, (manifest.hosts ?? []).join(','));
-  check('manifest 版本 0.7.10', manifest.v === '0.7.10', manifest.v);
+  const diskVer = JSON.parse(readFileSync(join(EXT_ROOT, 'manifest.json'), 'utf8')).version;
+  check(`manifest 版本 ${diskVer}`, manifest.v === diskVer, manifest.v);
 
   const storageVal = await evalInPage(swSess, `(async () => {
     try {
@@ -177,7 +178,9 @@ try {
           convItems: document.querySelectorAll('.om-conv-item').length,
           topSettings: !!document.getElementById('om-topbar-settings'),
           // 顶栏引擎切换已移除（默认本地 Agent 模式）：选择框不应存在
-          noEngine: !document.getElementById('om-engine'),
+          // 引擎切换下拉（Agent / LLM 问答 / LLM 任务）：新会话默认 Agent
+          engineVal: document.getElementById('om-engine')?.value || '',
+          engineOpts: [...(document.getElementById('om-engine')?.options || [])].map((o) => o.value).join(','),
           // agent 会话的输入框下方权限模式与 agent 模型下拉存在
           permSelect: !!document.getElementById('om-perm'),
           agentModelSel: !!document.getElementById('om-agent-model-sel'),
@@ -208,7 +211,7 @@ try {
     } else {
       check(`${name} 渲染`, dom.topbar && dom.msgs && dom.composer, JSON.stringify(dom));
       check(`${name} 侧栏骨架`, dom.sidebar && (dom.convItems ?? 0) >= 1, JSON.stringify(dom));
-      check(`${name} 设置入口（顶栏齿轮；默认 Agent 引擎、无引导卡、无引擎切换框）`, dom.topSettings && dom.noEngine && !dom.emptySettings && dom.noSummarize && dom.noTranslate, JSON.stringify(dom));
+      check(`${name} 设置入口（顶栏齿轮；引擎下拉默认 Agent、无引导卡）`, dom.topSettings && dom.engineVal === 'agent' && dom.engineOpts === 'agent,llm,llm-tools' && !dom.emptySettings && dom.noSummarize && dom.noTranslate, JSON.stringify(dom));
       check(`${name} 附件与知识库入口（目录绑定栏已移除）`, dom.attachBtn && dom.kbBtn && dom.noDirBar, JSON.stringify(dom));
       check(`${name} 顶栏导出按钮与会话重命名按钮`, dom.exportBtn && (dom.convEditBtns ?? 0) >= 1, JSON.stringify(dom));
       check(`${name} 输入框下方权限模式与 agent 模型下拉`, dom.permSelect === true && dom.agentModelSel === true, JSON.stringify(dom));

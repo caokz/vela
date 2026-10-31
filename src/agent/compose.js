@@ -15,6 +15,11 @@ export function knowledgeLocalDirs(conv) {
 // （opts.workspacePath 来自 session.new/resume 响应，工作区已自动加入 contextDirs）。
 export function buildAgentPrompt(conv, userItem, opts = {}) {
   const kbUploads = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'upload' && k.relPath);
+  // 浏览器授权的本机文件夹 / 文件：发送前已增量同步到工作区 wsPath（kb/sync.js）
+  const kbHandles = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'handle' && k.wsPath);
+  // bridge 管的本机路径：CLI 侧已进 additionalDirectories 可直接读，但模型不知道它们
+  // 存在——不在 prompt 里点名，问起相关内容它会按先验去网上找（GitHub / 搜索）
+  const kbLocals = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'local' && k.path);
   const attachments = userItem?.meta?.attachments ?? [];
   const absolute = !!(conv?.projectDir && opts.workspacePath);
   const ref = (relPath) => (absolute ? `${opts.workspacePath}/${relPath}` : relPath);
@@ -34,6 +39,17 @@ export function buildAgentPrompt(conv, userItem, opts = {}) {
       ? '知识库文件（已上传到独立工作区目录，你有读取权限，按绝对路径读取）：\n'
       : '知识库文件（已放入本会话工作目录 knowledge/ 下，回答前可按需读取）：\n')
       + kbUploads.map((k) => `- ${ref(k.relPath)}`).join('\n'));
+  }
+  if (kbHandles.length) {
+    // opts.syncedIds 是本轮真正同步（含增量跳过）的条目 id（chat-ui 传入）；
+    // 授权失效被跳过的条目如实标注，别让模型拿着「已同步」的承诺去列空目录、再转头联网
+    const mark = (k) => (opts.syncedIds && !opts.syncedIds.has(k.id) ? '（本轮未同步，内容可能过期或缺失）' : '');
+    blocks.push('知识库本机文件夹 / 文件（已同步到工作目录，回答相关问题优先读本地内容，本地查不到再联网；文件夹请先列目录再细读）：\n'
+      + kbHandles.map((k) => `- ${ref(k.wsPath)}${k.handleKind === 'dir' ? '/' : ''}（${k.name}）${mark(k)}`).join('\n'));
+  }
+  if (kbLocals.length) {
+    blocks.push('知识库本机路径（已加入会话可读目录，可用文件工具直接读取；回答相关问题优先读这些本地内容，本地查不到再联网；文件夹请先列目录再细读）：\n'
+      + kbLocals.map((k) => `- ${k.path}`).join('\n'));
   }
   if (attachments.length) {
     blocks.push((absolute

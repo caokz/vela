@@ -10,9 +10,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const CHROME = findChrome();
 const PORT = 9361;
 const WEB = 39321;
 

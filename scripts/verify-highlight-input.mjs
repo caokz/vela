@@ -7,14 +7,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const CHROME = join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const CHROME = findChrome();
 const PORT = 9341;
 const WEB = 39311;
 
-// 普通段落留足边距，给拖选与工具条留坐标空间
-const PAGE = `<!doctype html><html><head><style>body{margin:40px;font:20px/1.6 serif;}p{max-width:600px;}</style></head><body>
+// 普通段落留足边距：顶部 220px 让工具条按常态弹在选区上方（胶囊在高亮下方，鼠标得穿过正文才够得着）
+const PAGE = `<!doctype html><html><head><style>body{margin:220px 40px 40px;font:20px/1.6 serif;}p{max-width:600px;}</style></head><body>
 <p id="txt">The quick brown fox jumps over the lazy dog near the river bank and runs away.</p>
 </body></html>`;
 const server = createServer((req, res) => {
@@ -150,12 +151,24 @@ try {
   }
 
   if (pill) {
-    // 2c) 真实点击绿色色点换色
+    // 2c) 真实点击绿色色点换色：按真人轨迹从「高亮」钮位置分步移到色点（中途必然划过正文
+    //     与选区外空白——旧版在第一个正文 mouseover 就把胶囊收掉，色点永远点不到）
     const dot = JSON.parse(await evalInPage(sess, `(() => {
       const d = document.getElementById('om-sel-hlbtn-host').shadowRoot.querySelector('.dot[data-c="g"]');
       const r = d.getBoundingClientRect();
       return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
     })()`));
+    await sleep(350); // 真人反应时间：看到胶囊再动鼠标
+    await mouse(sess, 'mouseMoved', btn.x, btn.y + 1); // 光标原地微动：触发 Blink 对「工具条消失后光标下元素」的 hover 重算
+    await sleep(600);
+    check('高亮后光标停在原处 950ms 胶囊仍在（旧版约 260ms 被收）', !!await evalInPage(sess, `!!document.getElementById('om-sel-hlbtn-host')`));
+    // 细步长（≤3px）：高亮与胶囊之间有 6px 空隙，粗步长会跳过空隙、测不出「划过空隙即收」
+    const steps = Math.max(12, Math.ceil(Math.hypot(dot.x - btn.x, dot.y - btn.y) / 3));
+    for (let k = 1; k <= steps; k++) {
+      await mouse(sess, 'mouseMoved', btn.x + (dot.x - btn.x) * k / steps, btn.y + (dot.y - btn.y) * k / steps);
+      await sleep(15);
+    }
+    check('鼠标从工具条移向胶囊途中胶囊不消失', !!await evalInPage(sess, `!!document.getElementById('om-sel-hlbtn-host')`));
     await mouse(sess, 'mousePressed', dot.x, dot.y);
     await mouse(sess, 'mouseReleased', dot.x, dot.y);
     const rd = JSON.parse(await evalInPage(sess, `(() => {
@@ -173,10 +186,11 @@ try {
     const bgNoSheet = await evalInPage(sess, `getComputedStyle(document.querySelector('.om-hl')).backgroundColor`);
     check('样式表被移除后高亮仍显色（内联兜底）', bgNoSheet === 'rgba(96, 220, 140, 0.5)', String(bgNoSheet));
 
-    // 2d) 鼠标移开胶囊收起；悬停高亮区再挂出
+    // 2d) 鼠标移开胶囊延时收起（悬停胶囊 300ms，刚挂出的即时胶囊 1.5s）；悬停高亮区再挂出
     await mouse(sess, 'mouseMoved', 30, 30);
-    await sleep(400);
-    check('移出后胶囊收起', !(await evalInPage(sess, `!!document.getElementById('om-sel-hlbtn-host')`)));
+    let gonePill = false;
+    for (let i = 0; i < 15 && !gonePill; i++) { await sleep(200); gonePill = !(await evalInPage(sess, `!!document.getElementById('om-sel-hlbtn-host')`)); }
+    check('移出后胶囊收起', gonePill);
     const hlPt = JSON.parse(await evalInPage(sess, `(() => {
       const r = document.querySelector('.om-hl').getBoundingClientRect();
       return JSON.stringify({ x: r.left + 20, y: r.top + r.height / 2 });

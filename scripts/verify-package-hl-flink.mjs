@@ -3,19 +3,20 @@
 // 真实 Chrome 跑过本地页。本脚本两者兼备，并在最后做像素级显色断言。
 // 用法：VELA_CHROME=<chrome.exe> node scripts/verify-package-hl-flink.mjs [zip路径]
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { findChrome } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const ZIP = process.argv[2] ?? join(EXT_ROOT, 'dist', 'vela-0.7.10.zip');
-const CHROME = process.env.VELA_CHROME ?? join(process.env.LOCALAPPDATA ?? '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe');
+const WANT_VER = JSON.parse(readFileSync(join(EXT_ROOT, 'manifest.json'), 'utf8')).version; // 产物版本跟随 manifest
+const ZIP = process.argv[2] ?? join(EXT_ROOT, 'dist', `vela-${WANT_VER}.zip`);
+const CHROME = findChrome();
 const REAL = Boolean(process.env.VELA_CHROME);
 const PORT = 9356;
 const URL_ = process.argv[3] ?? 'https://nightlies.apache.org/flink/flink-docs-master/docs/learn-flink/etl/';
-const WANT_VER = '0.7.10';
 
 function decodePng(buf) {
   let off = 8, idat = [], w = 0, h = 0, ch = 0;

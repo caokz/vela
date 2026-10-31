@@ -1,6 +1,6 @@
 {
   "name": "vela-bridge",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "private": true,
   "description": "Vela 本地桥接进程：扩展经 WS 驱动本机 agent CLI（claude code 等）",
   "type": "module",

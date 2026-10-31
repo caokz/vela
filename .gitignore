@@ -1,5 +1,7 @@
 node_modules/
 dist/
-dev-key.pem
+*.pem
+*.env
+.env.*
 *.log
 bridge/node_modules/

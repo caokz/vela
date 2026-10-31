@@ -59,18 +59,22 @@ async function ensureWidgetRegistered() {
   }
 }
 
-// 安装/更新时向已打开的 http(s) 标签页补注浮窗（注册式注入只对之后加载的页面生效）
+// 安装/更新时向已打开的 http(s) 标签页补注浮窗（注册式注入只对之后加载的页面生效）。
+// 安装窗口内（30 秒）还有加载中的页面：导航在注册生效前已开始的页面注册式注入赶不上，
+// 立即 executeScript 又可能落进即将被替换的旧文档，两头落空（表现为装好/更新后该页划词无工具条、
+// 后台 om:open-card 报 Receiving end does not exist）。窗口内每个加载完成的页面再补一次；
+// 重复注入由脚本自身的单例守卫去重
 async function backfillWidgetTabs() {
+  const files = ['src/content/widget.js', 'src/content/selection-popup.js'];
+  const inject = (tabId) => chrome.scripting.executeScript({ target: { tabId }, files }).catch(() => {});
+  const onUpdated = (tabId, info, tab) => {
+    if (info.status === 'complete' && /^https?:/i.test(tab?.url || '')) inject(tabId);
+  };
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  setTimeout(() => chrome.tabs.onUpdated.removeListener(onUpdated), 30000);
   try {
     const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
-    await Promise.allSettled(
-      tabs
-        .filter((t) => t.id != null && !t.discarded)
-        .map((t) => chrome.scripting.executeScript({
-          target: { tabId: t.id },
-          files: ['src/content/widget.js', 'src/content/selection-popup.js'],
-        })),
-    );
+    for (const t of tabs) if (t.id != null && !t.discarded) inject(t.id);
   } catch (e) {
     console.error('浮窗补注失败:', e);
   }

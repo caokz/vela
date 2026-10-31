@@ -8,6 +8,7 @@ const REQUEST_TIMEOUT_MS = 30000;
 const CONNECT_TIMEOUT_MS = 10000;
 
 import { loadSettings, saveSettings } from '../llm/store.js';
+import { isCtxInvalid } from '../util/ctx-guard.js';
 
 let singleton = null;
 
@@ -63,7 +64,19 @@ function createClient() {
       // 守卫：已 ready / 已在连接就直接返回——重连定时器迟到触发时不能
       // 替换活连接（会把 ready 翻回 connecting，撞上请求帧发不出去）
       if (client.status === 'ready' || client.status === 'connecting') return;
-      const s = await loadSettings();
+      let s;
+      try {
+        s = await loadSettings();
+      } catch (e) {
+        // 扩展被重新加载 / 更新后旧页面的 chrome.* 全部失效：别再重连，否则定时器每次重试都抛一条未捕获异常
+        if (isCtxInvalid(e)) {
+          client._wantConnected = false;
+          clearTimeout(client._retryTimer);
+          client._failReady('扩展已更新，请刷新页面');
+          return;
+        }
+        throw e;
+      }
       if (client.status === 'ready' || client.status === 'connecting') return; // await 期间别人已开工
       client._url = s.agentBridge.url;
       client._token = s.agentBridge.token;
@@ -185,7 +198,9 @@ function createClient() {
     },
     replay(sessionId, fromSeq) { return client._request('events.replay', { sessionId, fromSeq }); },
     fsCheck(path) { return client._request('fs.check', { path }); },
-    fsList(path) { return client._request('fs.list', { path }); },
+    // opts.hidden：保留点号目录；opts.stat：条目附带 size / mtimeMs（LLM 文件工具用）
+    fsList(path, opts = {}) { return client._request('fs.list', { path, ...opts }); },
+    fsRead(path, maxBytes) { return client._request('fs.read', { path, ...(maxBytes ? { maxBytes } : {}) }); },
     // 一次性写入小文件（会话导出）：{path} 或 {cwdBase, workspaceId, relPath}
     fsWrite(params) { return client._request('fs.write', params); },
     removeWorkspace(params) { return client._request('workspace.remove', params); },
@@ -200,9 +215,10 @@ function createClient() {
     // 分块上传一个 File/Blob 到会话工作区：768 KiB 原始块 → ~1 MiB base64 帧，
     // 逐块确认（ws maxPayload 100 MiB 内从容）。失败时尽力取消清理半成品后上抛。
     // 返回 { path: 绝对路径, name: 实际落盘名（重名时 bridge 会加后缀） }。
-    async uploadFile({ cwdBase, workspaceId, relPath, file, onProgress }) {
+    // overwrite=true：原名覆盖（知识库目录增量同步），默认重名加后缀
+    async uploadFile({ cwdBase, workspaceId, relPath, file, onProgress, overwrite = false }) {
       await client.ensureReady();
-      const { uploadId, path, name } = await client.uploadBegin({ cwdBase, workspaceId, relPath });
+      const { uploadId, path, name } = await client.uploadBegin({ cwdBase, workspaceId, relPath, ...(overwrite ? { overwrite: true } : {}) });
       try {
         const CHUNK = 768 * 1024;
         const total = file.size;

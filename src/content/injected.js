@@ -7,7 +7,9 @@ export function extractArticle() {
   const SKIP = 'script,style,noscript,template,iframe,svg,canvas,nav,footer,aside,form,button';
   const clones = document.querySelectorAll(SKIP);
   const hidden = [];
-  for (const n of clones) { hidden.push(n); n.setAttribute('data-om-hidden', '1'); n.style.display = 'none'; }
+  // 记下原内联 display 再隐藏：还原时写回原值，不能一律清空——
+  // 页面自己用内联 display:none 藏起来的菜单/弹层会被意外显示出来
+  for (const n of clones) { hidden.push([n, n.style.display]); n.style.display = 'none'; }
   let title = document.title || '';
   let best = null;
   let bestScore = 0;
@@ -21,11 +23,21 @@ export function extractArticle() {
   }
   const container = best || document.body;
   const text = (container.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
-  for (const n of hidden) { n.style.display = ''; n.removeAttribute('data-om-hidden'); }
+  for (const [n, display] of hidden) n.style.display = display;
   return {
     title,
     url: location.href,
     text,
     usedContainer: best ? 'main' : 'body',
   };
+}
+
+// 当前选区文本（LLM 任务模式 get_selection 工具用）。输入框内的选区 getSelection 拿不到，单独读
+export function getSelectionText() {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && /^(text|search|url|email)$/i.test(a.type)))) {
+    const t = a.value.slice(a.selectionStart ?? 0, a.selectionEnd ?? 0);
+    if (t.trim()) return { title: document.title, url: location.href, text: t };
+  }
+  return { title: document.title, url: location.href, text: String(window.getSelection() || '') };
 }

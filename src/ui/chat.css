@@ -40,7 +40,8 @@ html, body {
   text-decoration: none;
   min-width: 0;
 }
-.om-logo svg { color: var(--om-brand); flex: none; background: var(--om-brand-weak); border-radius: 8px; padding: 3px; }
+/* 品牌标识：与扩展图标同款（对角渐变圆角方块 + 白色船帆），见 src/ui/brand.js */
+.om-logo svg { color: #fff; flex: none; background: linear-gradient(135deg, #8b6cff, #5a32e0); border-radius: 7px; padding: 3px; box-shadow: 0 1px 3px rgba(90, 50, 224, 0.35); }
 .om-new-chat {
   display: flex;
   align-items: center;
@@ -205,6 +206,20 @@ html, body {
   cursor: pointer;
 }
 .om-model-select:hover { background: var(--om-hover); }
+.om-engine-select {
+  flex: 0 0 auto;
+  height: 26px;
+  border: 1px solid var(--om-border);
+  background: var(--om-surface);
+  color: var(--om-text-2);
+  font: 500 var(--om-fs-sm) var(--om-font);
+  border-radius: var(--om-radius-sm);
+  padding: 0 4px;
+  margin-right: 4px;
+  cursor: pointer;
+}
+.om-engine-select:hover { background: var(--om-hover); color: var(--om-text); }
+.om-engine-select option { background: var(--om-bg); color: var(--om-text); }
 .om-agent-select {
   flex: 0 1 auto;
   min-width: 0;
@@ -419,6 +434,8 @@ details.om-agent-step { display: block; }
 .om-perm-allow:hover { background: var(--om-brand-hover); }
 .om-perm-deny { background: var(--om-surface); color: var(--om-text-2); border: 1px solid var(--om-border); }
 .om-perm-deny:hover { color: var(--om-err-fg); border-color: var(--om-err-fg); }
+.om-perm-always { display: flex; align-items: center; gap: 4px; margin-top: 6px; color: var(--om-text-2); cursor: pointer; }
+.om-llm-steps:empty { display: none; }
 
 /* ===================== 消息区 ===================== */
 .om-messages { flex: 1 1 auto; overflow-y: auto; padding: var(--om-sp-4) var(--om-sp-3); }
@@ -789,6 +806,26 @@ details.om-agent-step { display: block; }
   cursor: pointer;
 }
 .om-kb-actions button:hover { color: var(--om-text); border-color: var(--om-border-strong); }
+/* 浏览器授权（无需 bridge）的两个主入口 */
+.om-kb-actions button.om-kb-primary { border-color: var(--om-brand); color: var(--om-brand); background: var(--om-brand-weak); }
+.om-kb-actions button.om-kb-primary:hover { background: var(--om-brand-weak-2); }
+.om-kb-tag {
+  flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px;
+  color: var(--om-brand); background: var(--om-brand-weak-2);
+}
+/* 写文件审批卡里的 diff 预览 */
+.om-diff {
+  margin: 6px 0 0; max-height: 280px; overflow: auto; padding: 6px 0;
+  background: var(--om-bg); border: 1px solid var(--om-border); border-radius: var(--om-radius-sm);
+  font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre;
+}
+.om-diff > div { padding: 0 8px; min-height: 1.5em; }
+.om-diff > .is-add { background: rgba(46, 160, 67, 0.15); color: #1a7f37; }
+.om-diff > .is-del { background: rgba(248, 81, 73, 0.15); color: #cf222e; }
+@media (prefers-color-scheme: dark) {
+  .om-diff > .is-add { color: #56d364; }
+  .om-diff > .is-del { color: #ff7b72; }
+}
 .om-kb-actions input {
   flex: 1 1 160px;
   cursor: text;
@@ -992,3 +1029,4 @@ details.om-agent-step { display: block; }
   font: 600 var(--om-fs-md) var(--om-font);
 }
 .om-empty-btn:hover { background: var(--om-brand-hover); }
+.om-kb-hint { margin-top: 6px; color: var(--om-text-3); font-size: var(--om-fs-xs); line-height: 1.5; }

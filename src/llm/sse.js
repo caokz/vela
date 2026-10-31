@@ -9,7 +9,7 @@ export class ProviderHttpError extends Error {
   }
 }
 
-export async function consumeSse(res, onData) {
+export async function consumeSse(res, onData, { firstTimeoutMs = 180000, idleTimeoutMs = 60000 } = {}) {
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new ProviderHttpError(res.status, body);
@@ -18,20 +18,45 @@ export async function consumeSse(res, onData) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const frames = buf.split(/\r?\n\r?\n/);
-    buf = frames.pop() ?? ''; // 末帧可能不完整，留到下轮
-    for (const frame of frames) {
-      const data = frame
-        .split(/\r?\n/)
-        .filter((l) => l.startsWith('data:'))
-        .map((l) => l.slice(5).trim())
-        .join('\n');
-      if (data) onData(data);
+  let timer = 0;
+  let gotData = false;
+  // 空转看门狗：中转/上游挂死时连接还开着，reader.read() 永不落定——上层翻译批次
+  // 会无限卡在「翻译中」（x.ai/pricing 顶部 hero 卡死即此）。首帧与帧间分别计时，
+  // 超时主动断开报错；报错文案避开限流/上下文关键词，走普通重试路径
+  const readOnce = () => {
+    clearTimeout(timer);
+    const ms = gotData ? idleTimeoutMs : firstTimeoutMs;
+    const watchdog = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`流式响应超时：${Math.round(ms / 1000)} 秒未收到数据`)), ms);
+    });
+    return Promise.race([reader.read(), watchdog]);
+  };
+  try {
+    for (;;) {
+      const { value, done } = await readOnce();
+      if (done) break;
+      gotData = true;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split(/\r?\n\r?\n/);
+      buf = frames.pop() ?? ''; // 末帧可能不完整，留到下轮
+      for (const frame of frames) {
+        const data = frame
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trim())
+          .join('\n');
+        // onData 返回 true = 流已收尾（如 OpenAI 的 [DONE]）：主动断开，不等服务端关连接
+        if (data && onData(data) === true) {
+          reader.cancel().catch(() => {});
+          return;
+        }
+      }
     }
+  } catch (e) {
+    reader.cancel().catch(() => {}); // 看门狗触发/读取异常：断开挂死的连接再抛
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

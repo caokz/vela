@@ -85,11 +85,12 @@ session.resume {agentId, agentSessionId, cwdBase, workspaceId, contextDirs[], pe
 session.prompt {sessionId, text}                       → {accepted}（事件走 event 流）
 session.cancel {sessionId}                             → {ok}
 permission.respond {sessionId, requestId, outcome: 'allow'|'deny'} → {ok}
-fs.check     {path}                                    → {exists, isDirectory}
-fs.list      {path}                                    → {path, parent, entries:[{name,path,isDirectory}], truncated}
+fs.check     {path}                                    → {exists, isDirectory, size, mtimeMs}
+fs.list      {path, hidden?, stat?, limit?}            → {path, parent, entries:[{name,path,isDirectory,size?,mtimeMs?}], truncated}   // 默认过滤点号 / $ 开头；hidden 保留，stat 给文件附 size/mtimeMs；limit 默认 1000（浏览器 UI），封顶 50000（LLM 文件工具用）
+fs.read      {path, maxBytes?}                         → {path, size, mtimeMs, b64}（默认上限 30MiB，封顶 64MiB；LLM 任务读知识库里的本机路径）
 fs.write     {path | cwdBase+workspaceId+relPath, content} → {path, bytes}（≤10MiB，父目录自动创建，覆盖同名文件）
 events.replay {sessionId, fromSeq}                     → {events: [...]}
-upload.begin {cwdBase, workspaceId, relPath}           → {uploadId, path, name}
+upload.begin {cwdBase, workspaceId, relPath, overwrite?} → {uploadId, path, name}   // overwrite=true 原名覆盖（默认重名加 “ -2” 后缀）
 upload.chunk {uploadId, b64}                           → {bytes}
 upload.end   {uploadId}                                → {path, name, bytes}
 upload.cancel {uploadId}                               → {ok}（幂等）

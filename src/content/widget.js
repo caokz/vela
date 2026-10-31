@@ -8,8 +8,11 @@
     // 扩展重载后旧脚本上下文失效：浮窗残留在页面上但收不到任何消息
     //（后台 om:open-card 无人应答、sendMessage 抛错）。检测失效后摘掉旧宿主与
     // 本页残留的聊天卡/翻译 runner 重铺新版，后台补注（executeScript）才能生效。
+    // 判活：失效上下文里 chrome.runtime.id 是 undefined 而不是抛错（旧版 try/catch 永远判活，
+    // 补注直接 return，旧浮窗一直残留）；隔离世界复用时 chrome.runtime 也可能换成新对象，
+    // 旧实例记下的 runtime 引用对不上同样视为失效
     let alive = false;
-    try { void chrome.runtime.id; alive = true; } catch { /* 上下文已失效 */ }
+    try { alive = !!chrome.runtime?.id && window.__omWidget.rt === chrome.runtime; } catch { /* 上下文已失效 */ }
     if (alive) return;
     window.__omWidget.host?.remove();
     document.getElementById('om-card-host')?.remove();
@@ -24,7 +27,8 @@
     doc: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
     translate: '<path d="M3 5h9M7.5 5c0 4.5-2 8.5-4.5 10.5M4.5 9.5c1.6 3 4 5.2 7 6"/><path d="M12.5 19.5l4-10 4 10M14 16.5h5"/>',
     explain: '<path d="M12 4l1.8 5.2L19 11l-5.2 1.8L12 18l-1.8-5.2L5 11l5.2-1.8z"/><path d="M18.5 3.5v3M17 5h3"/>',
-    logo: '<path d="M5 6l7 12L19 6"/>',
+    // 船帆 logo：与 src/ui/brand.js 同一组路径（内容脚本禁 import，手抄；改那里要同步改这里）
+    logo: '<path d="M11.2 3.2 C15.6 6.6 18.3 11 18.8 15.8 L11.2 15.8 Z" fill="currentColor" stroke="none"/><path d="M9.6 6.4 L9.6 15.8 L4.4 15.8 C5.6 12.2 7.3 9 9.6 6.4 Z" fill="currentColor" stroke="none"/><path d="M3.4 17.4 L20.6 17.4 C19.7 19.7 17.7 21 15.3 21 L8.7 21 C6.3 21 4.3 19.7 3.4 17.4 Z" fill="currentColor" stroke="none"/><path d="M19.6 1.6 L20.15 3.35 L21.9 3.9 L20.15 4.45 L19.6 6.2 L19.05 4.45 L17.3 3.9 L19.05 3.35 Z" fill="currentColor" stroke="none"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   };
@@ -388,12 +392,12 @@
     root.innerHTML = `
       <style>
         :host { all: initial; }
-        .stack { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .stack { display: flex; flex-direction: column; align-items: center; gap: 8px; }
         .act {
           position: relative;
-          width: 46px; height: 46px; border-radius: 50%; border: none; cursor: pointer;
+          width: 36px; height: 36px; border-radius: 50%; border: none; cursor: pointer;
           background: #212227; color: #fff; display: flex; align-items: center; justify-content: center;
-          box-shadow: 0 4px 14px rgba(0,0,0,.28); padding: 0;
+          box-shadow: 0 3px 10px rgba(0,0,0,.26); padding: 0;
           transition: transform .12s ease, background .12s ease;
           user-select: none; -webkit-user-select: none;
         }
@@ -401,35 +405,35 @@
         .act:active { transform: scale(.96); }
         .pill {
           position: relative; border: none; cursor: pointer; padding: 0;
-          height: 48px; border-radius: 24px; background: #6841ea; color: #fff;
-          display: flex; align-items: center; gap: 8px; padding: 0 14px 0 10px;
-          box-shadow: 0 6px 18px rgba(68,44,180,.4);
-          font: 600 13px/1 system-ui, "Segoe UI", sans-serif;
+          height: 38px; border-radius: 19px; background: #6841ea; color: #fff;
+          display: flex; align-items: center; gap: 6px; padding: 0 12px 0 7px;
+          box-shadow: 0 4px 14px rgba(68,44,180,.36);
+          font: 600 12px/1 system-ui, "Segoe UI", sans-serif;
           transition: transform .12s ease;
           user-select: none; -webkit-user-select: none;
         }
         .pill:hover { transform: scale(1.04); }
         .pill .logo {
-          width: 30px; height: 30px; border-radius: 50%; background: #fff; color: #6841ea;
+          width: 25px; height: 25px; border-radius: 50%; background: #fff; color: #5a32e0;
           display: flex; align-items: center; justify-content: center; flex: none;
         }
         .dismiss {
-          position: absolute; top: -7px; left: -7px; width: 18px; height: 18px;
+          position: absolute; top: -6px; left: -6px; width: 16px; height: 16px;
           border-radius: 50%; cursor: pointer;
           background: #3a3b41; color: #fff; display: flex; align-items: center; justify-content: center;
           box-shadow: 0 2px 6px rgba(0,0,0,.3);
         }
         .dismiss:hover { background: #55565e; }
         .om-w-hint {
-          position: absolute; right: 54px; top: 50%; transform: translateY(-50%);
+          position: absolute; right: 44px; top: 50%; transform: translateY(-50%);
           background: #212227; color: #fff; font: 12px/1.4 system-ui, sans-serif;
           padding: 7px 11px; border-radius: 8px; white-space: nowrap;
           opacity: 0; pointer-events: none; transition: opacity .15s;
         }
         .om-w-hint.show { opacity: 1; }
         .om-w-gear {
-          position: absolute; left: -30px; top: 50%; transform: translateY(-50%);
-          width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+          position: absolute; left: -28px; top: 50%; transform: translateY(-50%);
+          width: 24px; height: 24px; border-radius: 50%; cursor: pointer;
           background: #212227; color: #fff; display: flex; align-items: center; justify-content: center;
           box-shadow: 0 2px 8px rgba(0,0,0,.3);
           opacity: 0; pointer-events: none; transition: opacity .12s ease;
@@ -438,7 +442,7 @@
         .om-w-gear:hover { background: #2c2d33; }
         @media (prefers-color-scheme: dark) { .om-w-gear { background: #2d2d2f; } .om-w-gear:hover { background: #3a3a3d; } }
         .om-w-pop {
-          position: absolute; right: 58px; width: 248px;
+          position: absolute; right: 46px; width: 248px;
           background: #212227; color: #fff; border-radius: 12px;
           padding: 12px 14px 10px; box-shadow: 0 10px 32px rgba(0,0,0,.38);
           font: 12px/1.5 system-ui, "Segoe UI", sans-serif;
@@ -487,11 +491,11 @@
         </button>
         <div class="om-w-hint"></div>
       </div>`;
-    root.querySelector('[data-act="page-summary"]').appendChild(svg('doc', 21));
-    root.querySelector('[data-act="translate-page"]').appendChild(svg('translate', 21));
-    root.querySelector('[data-act="quick-action"]').appendChild(svg('explain', 21));
-    root.querySelector('.pill .logo').appendChild(svg('logo', 17));
-    root.querySelector('.dismiss').appendChild(svg('close', 10));
+    root.querySelector('[data-act="page-summary"]').appendChild(svg('doc', 17));
+    root.querySelector('[data-act="translate-page"]').appendChild(svg('translate', 17));
+    root.querySelector('[data-act="quick-action"]').appendChild(svg('explain', 17));
+    root.querySelector('.pill .logo').appendChild(svg('logo', 16));
+    root.querySelector('.dismiss').appendChild(svg('close', 9));
     pillEl = root.querySelector('.pill');
 
     // 胶囊：就地开关页内聊天卡（无需 SW 参与，旧上下文失效也能开合）
@@ -586,11 +590,31 @@
     // om:tx-failed = 未开始/失败，复位按钮并就地给出原因；om:tx-done = 静默收场，撤掉 runner
     // 聊天卡 iframe 在宿主 shadow root 里：必须走 shadowRoot.querySelector 取窗口引用
     const cardFrame = () => document.getElementById(CARD_ID)?.shadowRoot?.querySelector('iframe')?.contentWindow || null;
+    // SPA 站点换页不重载页面，也就不重载聊天卡：卡片只在加载时索取过一次正文，之后上下文就是旧页面的。
+    // 卡片打开期间轮询地址（忽略 #hash），变化后等新页面渲染稳定（1.2s）再把新正文重发给卡片
+    const pageKey = () => location.origin + location.pathname + location.search;
+    let ctxPageKey = pageKey();
+    let ctxTimer = 0;
+    const ctxPoll = setInterval(() => {
+      let alive = false;
+      try { alive = !!chrome.runtime?.id; } catch { /* 上下文已失效 */ }
+      if (!alive) { clearInterval(ctxPoll); clearTimeout(ctxTimer); return; } // 扩展重载后旧实例自行退场
+      if (!chatCardOpen()) { ctxPageKey = pageKey(); return; }
+      const k = pageKey();
+      if (k === ctxPageKey) return;
+      ctxPageKey = k;
+      clearTimeout(ctxTimer);
+      ctxTimer = setTimeout(() => {
+        const w = cardFrame();
+        if (w) { try { w.postMessage({ type: 'om:card-ctx', ...extractPageContext() }, '*'); } catch { /* 页面环境异常时忽略 */ } }
+      }, 1200);
+    }, 1000);
     window.addEventListener('message', (ev) => {
       const d = ev.data;
       // 聊天卡索取宿主页正文：提炼后回传，由卡片挂到会话作为网页上下文（减少无上下文幻觉）
       if (d?.type === 'om:card-ctx-req') {
         if (ev.source === cardFrame()) {
+          ctxPageKey = pageKey();
           try { ev.source.postMessage({ type: 'om:card-ctx', ...extractPageContext() }, '*'); } catch { /* 页面环境异常时忽略 */ }
         }
         return;
@@ -631,7 +655,7 @@
       txBtn.title = '已翻译：再点一次还原原文';
     }
 
-    window.__omWidget = { host };
+    window.__omWidget = { host, rt: chrome.runtime }; // rt：补注时判断旧实例是否属于当前扩展上下文
     console.info(`[Vela] 页面浮窗已注入 v${chrome.runtime.getManifest().version}`);
   }
 

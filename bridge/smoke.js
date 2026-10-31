@@ -81,6 +81,36 @@ assert('fs.write 拒绝 .. relPath', fsWriteEscape.code === 'bad-path', fsWriteE
 const fsWriteHuge = await req(ws, 'fs.write', { path: `${fsWriteTmp}/huge.md`, content: 'x'.repeat(10 * 1024 * 1024 + 1) }).catch((e) => e);
 assert('fs.write 超 10MiB 报 too-large', fsWriteHuge.code === 'too-large', fsWriteHuge.message);
 
+// fs.read / fs.list(hidden, stat) / fs.check(size)：LLM 任务经 bridge 读知识库里的本机路径
+const fsReadDir = join(fsWriteTmp, 'readtest');
+mkdirSync(join(fsReadDir, '.vela'), { recursive: true });
+await req(ws, 'fs.write', { path: join(fsReadDir, 'a.txt'), content: '内容A' });
+const bin = Buffer.from([0, 1, 2, 250, 255, 0, 128]);
+const { writeFileSync: wf } = await import('node:fs');
+wf(join(fsReadDir, 'bin.dat'), bin);
+const rd = await req(ws, 'fs.read', { path: join(fsReadDir, 'bin.dat') });
+assert('fs.read 二进制字节经 base64 原样往返', Buffer.from(rd.b64, 'base64').equals(bin) && rd.size === bin.length && rd.mtimeMs > 0, `size=${rd.size}`);
+const rdBig = await req(ws, 'fs.read', { path: join(fsReadDir, 'bin.dat'), maxBytes: 3 }).catch((e) => e);
+assert('fs.read 超 maxBytes 报 too-large', rdBig.code === 'too-large', rdBig.message);
+const rdDir = await req(ws, 'fs.read', { path: fsReadDir }).catch((e) => e);
+assert('fs.read 目录报 bad-path', rdDir.code === 'bad-path', rdDir.message);
+const rdMiss = await req(ws, 'fs.read', { path: join(fsReadDir, 'nope') }).catch((e) => e);
+assert('fs.read 不存在报 bad-path', rdMiss.code === 'bad-path', rdMiss.message);
+const lsDefault = await req(ws, 'fs.list', { path: fsReadDir });
+assert('fs.list 默认隐藏点号目录、不带 size', !lsDefault.entries.some((e) => e.name === '.vela') && lsDefault.entries.every((e) => e.size === undefined), lsDefault.entries.map((e) => e.name).join(','));
+const lsFull = await req(ws, 'fs.list', { path: fsReadDir, hidden: true, stat: true });
+const lsA = lsFull.entries.find((e) => e.name === 'a.txt');
+assert('fs.list hidden+stat：含 .vela，文件带 size / mtimeMs，目录不带', lsFull.entries.some((e) => e.name === '.vela' && e.isDirectory && e.size === undefined) && lsA?.size === Buffer.byteLength('内容A') && lsA.mtimeMs > 0, JSON.stringify(lsA));
+// fs.list limit：默认 1000 条（浏览器 UI），工具传大 limit 才列全
+mkdirSync(join(fsReadDir, 'many'), { recursive: true });
+for (let i = 0; i < 1100; i++) wf(join(fsReadDir, 'many', `f${String(i).padStart(4, '0')}.txt`), 'x');
+const lsCut = await req(ws, 'fs.list', { path: join(fsReadDir, 'many') });
+assert('fs.list 默认单目录 1000 条截断并标 truncated', lsCut.entries.length === 1000 && lsCut.truncated === true, `n=${lsCut.entries.length}`);
+const lsAll = await req(ws, 'fs.list', { path: join(fsReadDir, 'many'), limit: 20000 });
+assert('fs.list 传 limit 后列全（1100 条，不截断）', lsAll.entries.length === 1100 && lsAll.truncated === false, `n=${lsAll.entries.length}`);
+const ck = await req(ws, 'fs.check', { path: join(fsReadDir, 'a.txt') });
+assert('fs.check 返回 size / mtimeMs', ck.size === Buffer.byteLength('内容A') && ck.mtimeMs > 0);
+
 const { sessionId } = await req(ws, 'session.new', { agentId: 'claude-code', cwd: '' });
 assert('session.new 返回 id', String(sessionId).startsWith('s:'));
 
@@ -188,6 +218,12 @@ try {
   const done2 = await req(ws, 'upload.end', { uploadId: up2.uploadId });
   assert('重名文件自动加后缀', done2.name === 'a -2.txt' && existsSync(join(expectedRoot, 'knowledge', 'a -2.txt')), done2.name);
   assert('原文件未被覆盖', readFileSync(join(expectedRoot, 'knowledge', 'a.txt')).equals(Buffer.from('hello 上传')));
+
+  // overwrite=true：原名覆盖（知识库目录增量同步刷新已变更文件）
+  const upO = await req(ws, 'upload.begin', { cwdBase: tmpBase, workspaceId: 'conv:smoke_ws-1', relPath: 'knowledge/a.txt', overwrite: true });
+  await req(ws, 'upload.chunk', { uploadId: upO.uploadId, b64: Buffer.from('third').toString('base64') });
+  const doneO = await req(ws, 'upload.end', { uploadId: upO.uploadId });
+  assert('overwrite 原名覆盖', doneO.name === 'a.txt' && readFileSync(join(expectedRoot, 'knowledge', 'a.txt'), 'utf8') === 'third', doneO.name);
 
   // 上传半途取消：半成品删除
   const up3 = await req(ws, 'upload.begin', { cwdBase: tmpBase, workspaceId: 'conv:smoke_ws-1', relPath: 'knowledge/c.bin' });
