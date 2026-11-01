@@ -39,11 +39,14 @@ async function connect(wsUrl) {
     const m = JSON.parse(ev.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m.result ?? m.error); pending.delete(m.id); }
   };
-  const send = (method, params = {}) => new Promise((res) => {
+  const send = (method, params = {}) => new Promise((res, rej) => {
     const id = ++msgId;
-    pending.set(id, res);
+    // 每调用 20s 超时：WS 被对端关闭后 pending 永远不会回来，这里不兜底整脚本就挂死
+    const timer = setTimeout(() => { pending.delete(id); rej(new Error(`CDP ${method} 20s 无响应`)); }, 20000);
+    pending.set(id, (m) => { clearTimeout(timer); res(m); });
     ws.send(JSON.stringify({ id, method, params }));
   });
+  ws.onclose = () => { for (const [, res] of pending) res({ error: { message: 'CDP 会话已关闭' } }); pending.clear(); };
   return { send, close: () => ws.close() };
 }
 async function evalInPage(sess, expr) {
@@ -115,7 +118,7 @@ try {
 
   // 端口应已释放
   let portFree = false;
-  try { execSync('netstat -ano | findstr :39217 | findstr LISTENING', { stdio: 'pipe', shell: 'cmd.exe' }); } catch { portFree = true; }
+  try { execSync('netstat -ano | findstr :39217 | findstr LISTENING', { stdio: 'pipe', shell: 'cmd.exe', timeout: 15000 }); } catch { portFree = true; }
   if (portFree) pass('端口 39217 已释放（进程退出）');
   else fail('端口仍被占用');
 
@@ -126,13 +129,18 @@ try {
   chrome.kill();
   await sleep(800);
   rmSync(profile, { recursive: true, force: true });
-  // 恢复 bridge（detached，隐藏窗口：shell:true 会留一个不关的 cmd 控制台）
-  spawn('powershell', ['-Command',
-    `Start-Process -FilePath 'node' -ArgumentList 'index.js' -WorkingDirectory '${BRIDGE_DIR}' -WindowStyle Hidden -RedirectStandardOutput 'bridge-detached.log' -RedirectStandardError 'bridge-detached.err.log'`],
-  { detached: true, stdio: 'ignore' }).unref();
-  await sleep(3500);
-  try {
-    execSync('netstat -ano | findstr :39217 | findstr LISTENING', { stdio: 'pipe', shell: 'cmd.exe' });
-    console.log('bridge 已恢复运行');
-  } catch { console.log('警告: bridge 未能自动恢复，需手动启动'); }
+  // 恢复 bridge（隐藏窗口拉起，同 scripts/restart-bridge.mjs）。不能加 detached:true——
+  // Windows 下会给 powershell 加 DETACHED_PROCESS，Start-Process 的重定向随之失效，
+  // bridge 拉不起来（实测交互运行正常、从 node detached spawn 必失败）。父进程随后
+  // 的轮询期足够 powershell 退出，父进程退出不连坐子进程。
+  spawn('powershell', ['-NoProfile', '-Command',
+    `Start-Process -FilePath 'node' -ArgumentList 'index.js' -WorkingDirectory '${BRIDGE_DIR}' -WindowStyle Hidden -RedirectStandardOutput '${join(BRIDGE_DIR, 'bridge-detached.log')}' -RedirectStandardError '${join(BRIDGE_DIR, 'bridge-detached.err.log')}'`],
+  { stdio: 'ignore' });
+  // 轮询最多 10s 等端口回来（node 冷启动 + 单实例锁检查需要一点时间）
+  let restored = false;
+  for (let i = 0; i < 20 && !restored; i++) {
+    await sleep(500);
+    try { execSync('netstat -ano | findstr :39217 | findstr LISTENING', { stdio: 'pipe', shell: 'cmd.exe', timeout: 15000 }); restored = true; } catch { /* 还没起来 */ }
+  }
+  console.log(restored ? 'bridge 已恢复运行' : '警告: bridge 未能自动恢复，需手动启动');
 }

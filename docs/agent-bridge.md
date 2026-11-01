@@ -1,6 +1,6 @@
 # 本地 Agent 桥接设计
 
-目标版本：0.5.0。状态：B1 已实现——bridge 全链路（server/turn/token/claude 适配器）+ 扩展侧（client/render/引擎切换/事件渲染）+ 设置页 Agent 区；0.5.0 在协议上追加会话工作区（`cwdBase`/`workspaceId`）与分块上传（`upload.*`），并修复 resume 后 bridge 会话 id 丢失、`agentSessionId` 存错两个 bug；`bridge/turn.test.js`、`bridge/smoke.js`、`bridge/live-check.js`（真机 turn）全部通过。与设计的偏差：单实例锁用端口占用即退出实现；Origin 校验放宽为 `chrome-extension://` 前缀（不锁单扩展 id）。参考实现：Orca（`src/main/claude`、`src/main/codex`、`src/main/acp`）。
+目标版本：0.5.0。状态：B1 + B2 已实现——bridge 全链路（server/turn/token/claude 适配器）+ 扩展侧（client/render/引擎切换/事件渲染）+ 设置页 Agent 区；0.5.0 在协议上追加会话工作区（`cwdBase`/`workspaceId`）与分块上传（`upload.*`），修复 resume 后 bridge 会话 id 丢失、`agentSessionId` 存错两个 bug，并新增 codex 适配器（`bridge/agents/codex.js`，协议 schema 取自 `codex app-server generate-json-schema`，0.162.x 实测）；`bridge/turn.test.js`、`bridge/codex-adapter.test.js`、`bridge/smoke.js`、`bridge/live-check.js`（真机 turn）全部通过。与设计的偏差：单实例锁用端口占用即退出实现；Origin 校验放宽为 `chrome-extension://` 前缀（不锁单扩展 id）。参考实现：Orca（`src/main/claude`、`src/main/codex`、`src/main/acp`）。
 
 ## 需求概述
 
@@ -25,7 +25,7 @@ chrome 扩展                                  本机
 │     WS 客户端 + 事件渲染       │  127.0.0.1│  ├─ server    WS + token 鉴权 │
 │ options 页                    │  :39217   │  ├─ registry  探测 + 适配器表  │
 │  └─ bridge/agent 设置区       │           │  ├─ claude    Claude Agent SDK│
-└─────────────────────────────┘           │  └─ codex     app-server(B2)  │
+└─────────────────────────────┘           │  └─ codex     app-server(已实现)│
                                           └──────────────────────────────┘
 SW 职责不变：右键菜单 / pendingTask / 浮窗注册。不碰 WS、不碰 agent。
 ```
@@ -56,7 +56,7 @@ ACP 的 `session/new` 自带 `cwd` + `additionalDirectories`，与需求 2/3 一
 | `bridge/registry.js` | 探测：对每个适配器跑其 `probe()`（如 `claude --version`，3s 超时）；返回 `[{id, name, version, authed}]`。`authed` 由适配器判定（claude：`~/.claude` 凭证存在；探测失败归为未安装）。 |
 | `bridge/turn.js` | 会话与 turn 状态机：`sessions: Map<sessionId, {agentId, agentSessionId, cwd, contextDirs, busy}>`。spawn 归 bridge 管，记 pid；客户端断开不杀子进程，重连后事件按 `seq` 补发（每会话保留最近 500 条环形缓冲）。 |
 | `bridge/agents/claude.js` | claude 适配器，包 Claude Agent SDK 的 `query()`。 |
-| `bridge/agents/codex.js` | B2：`codex app-server` JSON-RPC stdio 客户端。实现前以实际 `--help` 与握手抓取一次 schema，不凭记忆写方法名。 |
+| `bridge/agents/codex.js` | codex 适配器：spawn `codex app-server`（JSON-RPC over stdio，按行分帧），每轮一个进程，initialize → thread/start或resume → turn/start，通知归一化后经 emit 出去。协议 schema 取自 `codex app-server generate-json-schema`（0.162.x 实测）。 |
 
 ### 扩展侧
 
@@ -106,7 +106,7 @@ bridge.shutdown {}                                     → {ok}（回 ok 后关�
 - `projectDir`（会话绑定的项目目录）存在时覆盖 cwd（`resolve(expandTilde(...))`，不存在或不是目录报 `bad-path`）；工作区照常创建并作为 `workspacePath` 返回（上传/知识库仍落工作区），且自动追加进 `contextDirs`，agent 免审批读取上传件。无绑定时 `workspacePath` 即工作区根。`permissionMode` 会话级覆盖：扩展侧每轮 session.new/resume 带上 `conv.permissionMode || 设置页默认`，切模式无需新会话。
 - `contextDirs` 逐条 `expandTilde` 后交给适配器作 `additionalDirectories`。
 - `model`（可选字符串，trim 后截 100 字符）透传给适配器：claude-code 适配器非空时作 SDK `query()` 的 `model` 选项，空串用 SDK/CLI 默认模型。扩展侧来源两级：输入框下方的会话级下拉 `conv.model` 优先，回退设置页 agent 卡「模型」全局默认。
-- `models.list` 由适配器向自己背后的 LLM 网关拉模型列表（claude-code：`GET {ANTHROPIC_BASE_URL || https://api.anthropic.com}/v1/models?limit=100`，鉴权用 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 环境变量，8s 超时）。走中转网关时返回网关真实模型（如 glm-* 系列）；官方订阅登录没有 key，接口 401 报错，扩展侧捕获后回退预设别名 opus/sonnet/haiku，聊天不受影响。适配器未实现该方法的返回空列表。
+- `models.list` 由适配器拉自己背后的模型列表（claude-code：`GET {ANTHROPIC_BASE_URL || https://api.anthropic.com}/v1/models?limit=100`，鉴权用 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 环境变量，8s 超时；codex：起临时 `codex app-server` 发 `model/list` 取 `data[].id` 并过滤 hidden，10s 上限，失败退 config.toml 的默认模型）。走中转网关时返回网关真实模型（如 glm-* 系列）；官方订阅登录没有 key，接口 401 报错，扩展侧捕获后回退预设别名（claude 系 opus/sonnet/haiku；codex 系无静态别名，只留默认项），聊天不受影响。适配器未实现该方法的返回空列表。扩展侧下拉的列表缓存按 agentId 分键，切换 agent 即重拉，不沿用上一个 agent 的列表。
 - `upload.*` 与 session 生命周期解耦（知识库上传可能发生在首条消息之前）：`begin` 以 `wx` 独占创建落盘文件，重名自动加 ` -2`/` -3` 后缀（≤100 次，超过报 `file-exists`）；`chunk` 收 base64 块（单文件累计上限 200MB，超限报 `too-large` 并删除半成品）；`end` 落定返回绝对路径、实际落盘名与字节数；闲置 10 分钟的上传由每分钟一次的 sweep 清理。单块建议 ≤1MiB base64（ws maxPayload 100MiB）。
 - `fs.list` 供知识库面板浏览本机目录：跳过 `.`/`$` 开头的隐藏与系统项，symlink 按 stat 结果归类，目录优先、字母序排序，超 1000 条截断（`truncated:true`）。Windows 盘根之上无父目录，在盘根额外列出所有存在的盘符作目录项并钉在列表最前（`localeCompare` 把 `:` 当可忽略标点，混排会被埋掉），跨盘浏览不被困在启动盘；盘符探测并行做且单盘 250ms 超时、结果缓存 60s——断连的网络映射盘/空读卡器单次 stat 可阻塞数秒，串行探测会拖住整个盘根列表，探测超时的盘不列出但仍可经路径跳转直达。symlink 归类（stat 目标）也并行做。读不到的路径报 `bad-path`。扩展页无本机 fs 权限，这是勾选真实路径零拷贝引用的唯一入口；面板头部另有路径跳转框，粘贴绝对路径回车直达。
 - `fs.write` 会话导出等一次性小文件写入：`path` 为绝对/~ 路径，或走与 upload 一致的工作区三元组 `cwdBase+workspaceId+relPath`（relPath 过 `sanitizeRelPath`）。内容为 UTF-8 文本，上限 10MiB（超限报 `too-large`），父目录自动创建，同名文件直接覆盖。
@@ -150,9 +150,24 @@ bridge → 客户端，事件帧统一：
 | system prompt | `systemPrompt: {type:'preset', preset:'claude_code', append: LARGE_TASK_HINT}`——preset 后追加大任务引导（2–4 个并行 Task 子智能体拆分探索，替代主线程串行 Grep/Glob/Read）。SDK snapshot 语义：append 在会话首个请求固化进 transcript，旧会话 resume 不重读，只有新会话生效 |
 | Windows | SDK 的 `pathToClaudeCodeExecutable` 指向解析后的真实入口（`where claude` 的结果，规避 `.cmd` 需 shell 展开的问题） |
 
-### codex 适配器（B2，接口面待抓取后补全）
+### codex 适配器（`codex app-server` 映射，0.5.0 已实现）
 
-`codex app-server` 启动后按 JSON-RPC stdio 通信；映射关系同表结构：thread 创建/恢复 ↔ `session.new`/`session.resume`，turn 通知 ↔ 归一化事件，审批请求 ↔ `permission_request`。实现前先抓一次实际 schema 并在 `bridge/agents/codex.contract.test.js` 里 pin 关键帧。
+传输：spawn `codex app-server`，stdin/stdout 按行分帧的 JSON-RPC 2.0（响应帧可无 `jsonrpc` 字段）。每轮一个进程，结束即杀进程树（win32 `taskkill /T /F`）；续聊靠 codex 自身的 thread 持久化（`CODEX_HOME`），跨进程 `thread/resume` 实测可用。可执行文件解析优先 npm 全局包内的平台原生 exe（`.cmd` 壳经 shell 包装后 kill 不干净），`VELA_CODEX_PATH` 可覆盖。
+
+| 协议面 | codex 调用 |
+|---|---|
+| 发起 turn | `initialize` → `thread/start`（新）或 `thread/resume`（`agentSessionId`；失败降级 thread/start）→ `turn/start {threadId, input:[{type:'text'}]}` |
+| cwd / 附加目录 | thread 参数 `cwd`；`contextDirs` 经 turn 级 `sandboxPolicy: {type:'workspaceWrite', writableRoots}` 追加（与 claude 的 `additionalDirectories` 对齐） |
+| 权限模式 | `codexPolicy`：default/acceptEdits → `sandbox:'workspace-write'` + `approvalPolicy:'on-request'`；bypassPermissions → `danger-full-access` + `never` |
+| 增量文本 | `item/agentMessage/delta` → `message_chunk`；`item/reasoning/summaryTextDelta`/`textDelta` → `thought_chunk` |
+| 工具调用 | `item/started`（commandExecution / fileChange / mcpToolCall / webSearch）→ `tool_call`；`item/completed` → `tool_call_update`（status: completed/failed/declined→cancelled，aggregatedOutput / diff 摘要为 result） |
+| 权限审批 | 服务端请求 `item/commandExecution/requestApproval` / `item/fileChange/requestApproval` / `item/permissions/requestApproval`（新版，decision: accept/decline，权限画像原样回批）与 `execCommandApproval` / `applyPatchApproval`（旧版，approved/denied）→ `onPermission`；fileChange 请求不带路径，靠 items 缓存反查。每条服务端请求必须回包，未知请求回 `-32601`，否则 codex 侧挂起 |
+| 取消 | `turn/interrupt {threadId, turnId}`，宽限 3.5s 等 `turn/completed(status:interrupted)`，超时兜底杀进程树 |
+| 结束 | `turn/completed`：completed→end，interrupted→cancelled，failed→error（`turn.error.message` 透传）；`durationMs` 经 `usage` 事件透出 |
+| 模型列表 | `model/list`（过滤 hidden），失败退 `config.toml` 的 `model =`，再失败抛错由前端回退预设 |
+| 登录判定 | `auth.json` 存在（ChatGPT 登录）或 `config.toml` 配了 `model_providers.*`（自建网关，实测未登录 ChatGPT 也可用） |
+
+`bridge/codex-fake.mjs` 是按同一协议复刻的假 app-server，`bridge/codex-adapter.test.js` 经 `VELA_CODEX_PATH` 拉起它覆盖审批/续聊/取消/崩溃各路径。
 
 ## 数据模型
 

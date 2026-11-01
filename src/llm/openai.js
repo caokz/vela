@@ -6,8 +6,16 @@
 import { consumeSse } from './sse.js';
 
 // 统一消息形状 → OpenAI wire 格式。
-// 统一形状：{role:'system'|'user', content} | {role:'assistant', content, toolCalls?:[{id,name,arguments}]}
+// 统一形状：{role:'system'|'user', content, attachments?} | {role:'assistant', content, toolCalls?:[{id,name,arguments}]}
 //          | {role:'tool', toolCallId, name, content, isError?, attachments?:[{kind:'pdf'|'image', mime, name, data(base64)}]}
+// attachments：user 消息直接携带（图片理解）；tool 消息的附件在 wire 上无处安放，
+// 紧随其后补一条 user 消息携带（工具结果原件）。
+function attachmentPart(a) {
+  return a.kind === 'pdf'
+    ? { type: 'file', file: { filename: a.name, file_data: `data:${a.mime};base64,${a.data}` } }
+    : { type: 'image_url', image_url: { url: `data:${a.mime};base64,${a.data}` } };
+}
+
 export function toOpenAiMessages(messages) {
   const out = [];
   let pending = []; // 本组工具结果里的附件：tool 角色只收文本，紧随其后补一条 user 消息携带
@@ -17,9 +25,7 @@ export function toOpenAiMessages(messages) {
       role: 'user',
       content: [
         { type: 'text', text: `以下是上面工具结果附带的文件原件：${pending.map((a) => a.name).join('、')}` },
-        ...pending.map((a) => (a.kind === 'pdf'
-          ? { type: 'file', file: { filename: a.name, file_data: `data:${a.mime};base64,${a.data}` } }
-          : { type: 'image_url', image_url: { url: `data:${a.mime};base64,${a.data}` } })),
+        ...pending.map(attachmentPart),
       ],
     });
     pending = [];
@@ -46,6 +52,13 @@ function toOpenAiMessage(m) {
     };
   }
   if (m.role === 'tool') return { role: 'tool', tool_call_id: m.toolCallId, content: String(m.content ?? '') };
+  // user 消息带附件（图片理解）：文本 + 图片混合的 content 数组
+  if (m.attachments?.length) {
+    return {
+      role: m.role,
+      content: [{ type: 'text', text: String(m.content ?? '') }, ...m.attachments.map(attachmentPart)],
+    };
+  }
   return { role: m.role, content: m.content };
 }
 

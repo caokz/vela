@@ -40,7 +40,7 @@ manifest.json
 - `storage.session.pendingTask`：`{kind:'quick-action', actionId, title, prompt, sourceUrl, ts}` / `{kind:'page-summary', tabId, ts}` / `{kind:'translate-page', tabId, ts}`（SW 不跑 LLM，交面板编排；兼容读旧 `pendingPrompt` 一个版本；面板未配置供应商时保留任务，配置后重开面板自动继续）
 - `storage.session.omWidgetHidden`：已废弃（0.3.0 移除）。浮窗「×」现为纯 DOM 隐藏，仅当前页生效，刷新即恢复
 
-ID 全部客户端生成，UUID 前缀区分类型；消息树靠 `parentItemId` 串联（v1 线性渲染，字段先就位）。`meta={kind:'page-summary',url,title}` 标记网页总结来源消息，渲染为来源 chip。
+ID 全部客户端生成，UUID 前缀区分类型；消息树靠 `parentItemId` 串联（v1 线性渲染，字段先就位）。`meta={kind:'page-summary',url,title,chars}` 标记网页总结来源消息，渲染为来源 chip + 一行指令「总结这个网页」+ 折叠的完整 prompt（`content` 存全文不动：发给模型 / 复制 / 导出 / 追问历史都读它，只是气泡不铺开整页正文）。
 
 ## LLM 适配层
 
@@ -68,7 +68,7 @@ Chrome 扩展不能起进程、不能枚举目录，本机 CLI agent（Claude Co
 - **src/agent/ 扩展侧**：`client.js` 单例 WS 客户端（重连退避 1s→10s、30s 请求超时、多页面共享单连接各自回调；`uploadFile` 768KiB 原始块分片上传并回报进度），`render.js` 纯函数状态机（事件进、状态出，`stateFromMeta` 离线重放历史消息），`compose.js` 纯函数（知识库 local 条目去重为 `contextDirs` 并在 prompt 里点名——不点名模型不知道本机有这些内容，会按先验去网上找；知识库上传件与附件以工作区相对路径附加进 prompt；handle 条目按本轮同步结果如实标注，未同步的注明「内容可能过期或缺失」）
 - **chat-ui.js 编排**：引擎是会话级记忆属性（顶栏 `#om-engine` 三选一：Agent / LLM 问答 / LLM 任务。空会话原地切换；已有消息的会话不改写历史引擎，改为新建该引擎的对话；所选值记入 `chat.defaultEngine` 作为新会话默认；`syncEngineUi` 按引擎同步模型/agent/权限选择器显隐、恢复会话记住的 [供应商, 模型] 与知识库按钮高亮）；LLM 任务模式经 `runToolLoop`（`src/llm/tool-loop.js`）跑 `browser-tools.js` 的浏览器工具，副作用工具（fetch_url / open_tab / download_file）弹内联审批卡，可勾「本对话不再询问」，停止本轮按拒绝收场；工具循环出口保证轨迹完整（assistant 的每个工具调用都有对应结果消息，缺了的话该会话之后每次请求都会被服务端 400 拒掉），追问轮拼装历史时再过一遍 `repairToolTrail` 修复旧版本存下的残缺轨迹；会话字段小改走 `patchConversation`（内存与存储同改并回写 updatedAt），发送准备期 `preparing` 计数挡住多视图同步整表替换内存（否则刚发的消息会被旧快照冲掉）；`runAgentTurn` 每轮带 `{cwdBase, workspaceId: 会话 id, contextDirs: 知识库本地路径, permissionMode, projectDir}` 建/续会话并接住响应的 `workspacePath`，`agentSessionId`（SDK 会话 id，`s:` 前缀的旧值不 resume）有效则 resume 否则 new，turn 结束把 `session_info` 给的 id 写回会话；流式渲染 rAF 合帧；停止按钮走 `session.cancel`，由 `turn_end(cancelled)` 事件收尾落盘，避免双写；重连后 `events.replay` 从上次 seq 补帧；`permission_request` 事件除消息区审批卡外同步 toast 提醒（审批卡滚出视口等于静默挂起，30 分钟超时自动拒绝）
 - **权限模式（会话级）**：输入框下方工具行的下拉（`#om-perm`，Orca 布局），三档 default/acceptEdits/bypassPermissions 对应每步审批/自动接受编辑/自动放行；显示值 = `conv.permissionMode ?? 设置页默认`（设置页 `#om-agent-perm` 配全局默认），切换写回会话记录，session.new/resume 每轮带上，下一轮生效无需新会话。bridge 侧原本就透传 `permissionMode`，无改动
-- **模型透传（两级）**：设置页 agent 卡「模型」（`#om-agent-model`，可手填任意模型 id，留空用默认）→ `agentBridge.model` 全局默认；输入框下方另有会话级下拉 `#om-agent-model-sel`，写 `conv.model` 覆盖全局。下拉选项经 bridge 的 `models.list` 动态拉取（适配器向背后 LLM 网关 `GET /v1/models`，走中转时返回网关真实模型，与 Orca 同思路），拉不到回退预设别名 opus/sonnet/haiku，会话已存的自定义值始终保留为选项。`runAgentTurn` 每轮带 `model: conv.model || agentBridge.model || ''` → bridge 存 session → claude 适配器非空时作 SDK `query()` 的 `model` 选项
+- **模型透传（两级）**：设置页 agent 卡「模型」（`#om-agent-model`，可手填任意模型 id，留空用默认）→ `agentBridge.model` 全局默认；输入框下方另有会话级下拉 `#om-agent-model-sel`，写 `conv.model` 覆盖全局。下拉选项经 bridge 的 `models.list` 动态拉取（按当前所选 agent 分流：claude 适配器问网关 `GET /v1/models`，codex 适配器起临时 app-server 问 `model/list`；走中转时返回网关真实模型，与 Orca 同思路）。列表缓存以 agentId 为键：切换 agent 即重建下拉并重拉（渲染层也只认当前 agent 的缓存，防迟到响应串台），杜绝 codex 下仍显示 claude 网关的模型；拉不到回退预设别名——claude 系 opus/sonnet/haiku，codex 系模型名迭代快不硬编码（只留默认项），会话已存的自定义值始终保留为选项。`runAgentTurn` 每轮带 `model: conv.model || agentBridge.model || ''` → bridge 存 session → claude 适配器非空时作 SDK `query()` 的 `model` 选项
 - **运行中可发消息**：agent 轮进行中 `streaming={kind:'agent'}`，`sendPrepared` 把消息入 `agentQueue`（userItem 已落盘，关页不丢），toast 报队列位次；本轮 `runAgentTurn` 收尾后 `drainAgentQueue` 用重查的会话引用逐条发起（loadConversations 已替换对象）。LLM 轮不变：发送按钮仍是「发送 ⇄ 停止」一体。agent 轮的停止移到 composer 独立按钮 `#om-stop`（`session.cancel`，`turn_end(cancelled)` 事件收尾）
 - **跳到最新**：`scrollPinned` 贴底跟随（距底 <40px 视为贴底）。流式期间用户上滚即停跟随并浮出 `#om-jump` 浮标（绝对定位在 `.om-main` 底部居中），点按回底恢复；`flush`/`flushAgentTurn` 的自动滚动与 `renderMessages` 的复位都走同一开关
 - **回答尾部动作行（对齐 Orca）**：每条回答末尾两个图标按钮——复制（`navigator.clipboard.writeText` 写 `item.content` 的 Markdown 原文）与回到该问题（按 `parentItemId` 找提问消息元素 `scrollIntoView` 平滑滚过去，同时置 `scrollPinned=false` 并浮出 `#om-jump`，语义同用户上滚翻历史）。流式期间经 `.om-streaming` 类 CSS 隐藏，轮结束 `renderMessages` 重建后出现；LLM 与 agent 引擎共用（`messageEl` 单点渲染）
@@ -107,7 +107,7 @@ Chrome 扩展不能起进程、不能枚举目录，本机 CLI agent（Claude Co
 
 ### 总结
 
-tabs.query 活动标签 → 不可注入页（chrome:// 系等）toast → 无会话则建「网页总结」→ executeScript 注入 `extractArticle()`（剔 script/style/nav/footer/aside 后按文本密度选容器，回退 body，截 12000 字符）→ <80 字符报错 → user item `meta={kind:'page-summary',url,title}` 渲染来源 chip → 常规流式回复。提取文本随消息持久化，追问时历史自然带上下文。
+tabs.query 活动标签 → 不可注入页（chrome:// 系等）toast → 无会话则建「网页总结」→ executeScript 注入 `extractArticle()`（剔 script/style/nav/footer/aside 后按文本密度选容器，回退 body，截 12000 字符）→ <80 字符报错 → user item `meta={kind:'page-summary',url,title,chars}`：气泡渲染来源 chip + 「总结这个网页」+ 折叠原文（点开可看完整 prompt）→ 常规流式回复。提取文本随消息 `content` 全文持久化（渲染折叠只是显示层，不截断），追问时历史自然带上下文。
 
 ### 翻译协议（Port 'om-tx'，视口驱动）
 
@@ -126,6 +126,26 @@ tabs.query 活动标签 → 不可注入页（chrome:// 系等）toast → 无�
 ### 快捷动作
 
 SW 右键菜单从 `llmSettings.quickActions` 动态生成（父菜单「Vela」+ 4 条默认动作 + 「翻译此网页」）；`om:refresh-menus` 消息触发重建。动作点击 → SW 先向来源标签页发 `om:open-card` 展开页内聊天卡，再替换 prompt 模板 `{text}` 为选中文本（截 2000 字符）写 `pendingTask`，聊天卡 iframe（与原生面板同为 sidepanel.html）加载时消费或经 `storage.session.onChanged` 实时消费自动发送；来源页浮窗无应答（扩展重载后旧页面浮窗失效、chrome:// 页不可注入）时，后台先 `executeScript` 补注浮窗重试，仍不可注入则开独立聊天页兜底——不调 `sidePanel.open`，原生面板一旦打开收不回去。
+
+### 划词思维导图
+
+**交互模型：高亮只记录，生成永远显式。** 频繁增删高亮若逐次生成会让导图结构反复重排，所以素材先落库，用户读完再一键生成。
+
+- **记录**：划词工具条点「高亮」→ content script 发 `om:mindmap-collect` → SW 把归一化文本记入 `chrome.storage.local` `omMindmapInbox`（`src/mindmap/draft.js` 纯函数：按页 key（URL 去 hash）分组、文本归一去重、单页 100 段上限、全库 200 页 LRU；取消高亮（再点一次）同步移出对应段，页面素材清空即删页）。右下角 toast 只提示段数。
+- **查看入口（两个，都不生成、只开查看页）**：划词工具条「思维导图」钮；浮窗动作列「导图」钮（无需选中文字，像翻译一样常驻可见）。SW 顺带把页面正文快照（content script 快照前先隐藏自身浮层——收集 toast 等文案不属于页面内容；`innerText` 压连续空行截 12000）写进素材库该页条目——**没有条目也建（items 为空）**：整页生成模式不需要任何高亮素材，同样按 updatedAt LRU 淘汰——再写 `storage.session` `omMindmapJob:<id>`（`{view:1, url, title}`）后 `tabs.create` 打开 `src/mindmap/mindmap.html#job=<id>`；查看页消费即删（刷新不带任务，无任务落输入视图可手动粘贴任意主题）。
+- **生成（双模式，顶栏可切换）**：查看页素材卡列出本页全部高亮段（可逐段 × 删除）。「生成思维导图」＝**高亮素材模式**（默认）：`buildMindmapPrompt` 用网页正文作上下文 + 【高亮片段】逐段编号（`assembleDraftText` 组装，超限按比例截断），高亮是要点（所有片段要点不可遗漏、可归纳合并不逐段硬拆），未高亮内容不单独成支。「用整页正文生成」＝**整页模式**：`buildMindmapFullPrompt` 直接用整页快照，零高亮也可用，忽略导航/目录/页脚。顶栏「高亮导图 / 整页导图」切换钮（画布与输入视图都显示；当前模式禁用并高亮为主色）：切另一模式时同页已有该模式记录则**直接打开零 LLM 调用**，没有才走对应生成（`switchPageMode`，生成仍由点击显式触发）。「新导图」清空画布回输入视图（粘贴另起一张），清空前记 `state.backId`，顶栏亮出「‹ 返回导图」一键退回被清空的图。两套 prompt 共用颗粒度规则（`MINDMAP_GRAIN_RULES`）：宁整勿碎（叶子是可独立看懂的完整要点短句、严禁单词级拆分与同义分支）、按原文章节脉络归纳组织（不逐条机械映射）、父节点 2~6 个子节点、没有真正子结构不再加层。**出处标注**：高亮模式叶子末尾标〔片段n〕（多来源〔片段1、片段3〕；素材无【片段n】编号时不标——手动粘贴即无），整页模式标〔§小节名〕（截 12 字内），推理补全的节点不标。生成在查看页上下文（MV3：流式 fetch 不进 SW）用激活供应商 `streamChat` 单轮完成，流式期间 250ms 节流渐进解析渲染。
+- **历史与增量**：成品按页 key 存 `omMindmaps`（最近 50 份）——**同一页高亮与整页各一条**（`rec.mode: 'material' | 'full'`，老记录无 mode 按 material 认领；查看入口默认展示高亮记录，本页无高亮素材时回落整页记录；历史列表带「高亮 · / 整页 ·」模式标签）。指纹双轨：高亮记 `draftSig`（素材，顺序敏感 djb2，增删改/换序都变），整页记 `textSig`（正文，`p` 前缀，与素材指纹永不互撞）。没变重开直接渲染旧图零调用；有变仅状态提示（「素材有更新（N 段）」/「网页正文有更新」），点「重新生成」沿用当前模式覆盖对应记录。`#id=<mm:>` 重开不调 LLM。手动粘贴生成的是无页 key 的独立条目。
+- **编辑**：双击节点就地改名（fixed 定位浮层跟节点，Enter 提交 / Esc 取消）；「编辑大纲」切 textarea 视图，`outlineToMarkdown` 回填、改完 `parseOutline` 解析回来（roundtrip 同构，单一顶层节点即根、多顶层包在原标题下），应用即重渲染并回存。
+- **渲染与导出**：零依赖 SVG 双侧树：根居中、一级分支左右分列（整洁树布局，分支配色子树继承），节点点击折叠（外侧直接子节点数徽标，双击不触发折叠闪动）、拖拽平移、滚轮缩放（光标为锚）、适配视图。叶子标签尾部的出处标注（〔片段n〕/〔§小节名〕）经 `splitRef` 拆出，渲染成 11px 灰色小字 tspan（同行放得下紧接主体、放不下退自身一行；label 本身保留完整标注，编辑/导出往返不丢）。大纲解析与导出是纯函数（`src/mindmap/outline.js`，Node 可自测）：`parseOutline` 支持标题层级与 2/4 空格、tab 缩进的嵌套列表（缩进栈推断层级、列表挂靠最近标题），剥模型爱加的 ``` 围栏与行内标记；`outlineToFreemind` 输出 FreeMind 1.0.1 XML；导出 .md / .mm 经 Blob `<a download>` 落盘。注意：SVG 元素上 `el.hidden = false` 只是无效 expando（SVG 无 hidden 属性语义），显隐必须 `toggleAttribute('hidden', …)`。
+
+### 网页媒体
+
+Monica 式悬停交互，**悬停是唯一入口**（原浮窗「媒体」大面板与整页扫描清单已按需求移除）：鼠标停在媒体元素上浮出操作钮，点钮就地展开单媒体弹层（`src/media/panel.html?mode=hover`，扩展页 iframe，shadow host `#om-media-pop`，约 400px）。**分工由上下文能力决定**：弹层是扩展页——host_permissions 让它直接 fetch 跨域图片字节、流式视觉调用与 `chrome.downloads` 都合规（MV3：网络不进 SW）；宿主 `widget.js` 在页面源里——blob: 图片 canvas 转码（字节只存在于页面源）、视频 seek 截帧必须在这边做。两侧 postMessage 对接（来源校验 `isMediaWin(ev.source)`：仅当前悬停弹层的 contentWindow，iframe 挂在 shadow root 内，取 `contentWindow` 必须经 `.shadowRoot.querySelector`）：`om:media-img-req{src,idx}` → `om:media-img{ok,dataUrl|error}`、`om:media-frames-req{src,idx,count}` → `om:media-frames{ok,frames:[{t,dataUrl}]|error}`、`om:media-close` ←（弹层 ✕）请宿主收起，面板侧 `hostCall` 带 4~20s 超时。转码 / 截帧的目标元素**按 src 精确匹配**（弹层只带 src，没有扫描列表；匹配不到明确报错「目标已不在页面上」——退回首元素会把无关媒体悄悄分析掉）。
+
+- **图片 → 视觉附件**（`imageAttachment` + `downscale`）：blob: 先经宿主 canvas 转 data:（同源不污染画布；跨域图抛 SecurityError 时提示「受跨域保护」）；http/data 直接 fetch。png/jpeg/webp ≤3.5MB 原样透传，其余（gif 取首帧、超大图、SVG 经 Image 栅格化）OffscreenCanvas 降采样到最长边 1568 / jpeg q0.85。附件随 user 消息 `attachments` 下发（OpenAI `image_url` / Anthropic base64 `image` 块，适配层已支持）。
+- **图片四动作**：分析 / 提取 = `buildImagePrompt`（分析讲主体与要点；提取要求逐字保留图中所有文字、表格出 markdown、代码出代码块；图注 alt 与来源 URL 随 prompt 给出），结果流式渲染进卡片结果区（缓存复用，带复制按钮）；进导图 = 一句话描述（`mode:'describe'`）以 `【图片】` 前缀经既有 `om:mindmap-collect` 入本页素材库（显式带 `url`——弹层页没有 tab 上下文），**已分析过的图直接复用分析结果零额外调用**（冷路径先跑一句话概括）；下载 = 文件名取 URL basename（清洗非法字符，mime 兜底扩展名），URL 直交 `chrome.downloads`（`filename` 生效；blob: 先转 data:——objectURL 交给下载器会丢指定文件名落成 UUID）。
+- **视频**：LLM 看不了视频，按时间轴抽关键帧整包交给视觉模型（`buildVideoFramesPrompt`：分析 = 主题与内容演进分点，提取 = 逐帧字幕/文案逐字标注先后）。截帧在宿主 `captureFrames`：seek 到 [4%, 25%, 50%, 75%, 96%] 时长（最多 5 帧至少 2 帧，768px jpeg 0.82，帧序还原 `currentTime`）；`'seeked'` 只代表定位完成，**MSE 流（bilibili 类）上新帧要再等一拍 `requestVideoFrameCallback` 确认上屏才能画**——立刻画会拿到旧帧或半解码的模糊帧（慢解码 / 不支持该 API 由超时与 rAF 兜底）；**MediaRecorder 产的 webm `duration=Infinity`**，先 seek `1e7` 触发 durationchange 拿到真实时长再回到 0（durationchange 慢机器上可能迟到，重试一轮，两轮都失败按单帧兜底）；跨域保护视频报「无法截帧分析」。下载只对**直连文件**（http(s) src）开放——URL 直交下载器；流式（blob:/MSE）没有独立文件地址不可下载，只能截帧分析；嵌入播放器 iframe 跨域进不去，随大面板一并不再支持。
+- **悬停钮与就地弹层**：`widget.js` 在 document 上监听 `mouseover`，命中 ≥80px 的 `img`/`video`（渲染矩形任一边达标，过滤 `#om-` 前缀宿主与 chrome-extension 源）停留 200ms 后，于目标右上角浮出品牌紫圆钮（`#om-media-hover`，fixed，滚动/缩放 rAF 跟随）；离开宽限 350ms 收起，命中钮/弹层视为未离开。点钮开就地弹层 `#om-media-pop`（复用 `panel.html?mode=hover&kind=img|vid&src=…&w=…&h=…&alt=…&vk=…&dur=…&url=…&title=…`——页面 url/标题随 query 带入，进导图素材入库要用）：面板检测 `mode=hover` 即单媒体模式，隐藏页签/重扫、单卡全宽大图、头部加 ✕。弹层开着 `popPinned` 让钮保持为锚；再悬停别的媒体钮跟过去、弹层按 `popSrc` 对比**就地重载**（不关再开）；收起路径 = 弹层外点击（document capture 阶段判定）/ 弹层内 ✕（`om:media-close`，只认弹层窗口）/ 再点同目标的钮。收起后指针仍压在媒体上时，遮罩移除会让 Blink 重发 `mouseover`、钮重新长出——留在原地即可再点，属预期行为。
 
 ## 样式系统
 

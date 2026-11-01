@@ -37,7 +37,7 @@ export async function summarizeCurrentTab() {
   }
   return {
     prompt: buildSummaryPrompt({ title: article.title, url: article.url, text: article.text }),
-    meta: { kind: 'page-summary', url: article.url, title: article.title },
+    meta: { kind: 'page-summary', url: article.url, title: article.title, chars: article.text.length },
   };
 }
 

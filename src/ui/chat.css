@@ -519,6 +519,9 @@ details.om-agent-step { display: block; }
 .om-chip a { color: var(--om-text); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .om-chip a:hover { color: var(--om-link); }
 
+/* 网页总结消息：正文折叠进 details（默认收起），展开区限高滚动 */
+.om-summary-src .om-agent-thought-body { max-height: 260px; }
+
 .om-cursor-hint { color: var(--om-text-2); font-size: var(--om-fs-sm); }
 
 /* Markdown */

@@ -81,21 +81,24 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'PASS' : 'FAIL'} 
 async function runCase(sess, path, wait = 3400) {
   await sess.send('Page.navigate', { url: `http://127.0.0.1:${WEB}/${path}` });
   await sleep(1200);
-  await evalInPage(sess, `document.getElementById('txt')?.scrollIntoView()`);
-  await sleep(200);
-  const p = JSON.parse(await evalInPage(sess, `(() => {
-    const node = document.createTreeWalker(document.getElementById('txt'), NodeFilter.SHOW_TEXT).nextNode();
-    const len = node.textContent.length;
-    const r1 = document.createRange(); r1.setStart(node, 0); r1.setEnd(node, 1);
-    const r2 = document.createRange(); r2.setStart(node, len - 1); r2.setEnd(node, len);
-    const a = r1.getBoundingClientRect(), b = r2.getBoundingClientRect();
-    return JSON.stringify({ x1: a.left, y1: a.top + a.height / 2, x2: b.right, y2: b.top + b.height / 2 });
-  })()`));
-  await mouse(sess, 'mousePressed', p.x1, p.y1);
-  for (let k = 1; k <= 8; k++) await mouse(sess, 'mouseMoved', p.x1 + (p.x2 - p.x1) * k / 8, p.y1);
-  await mouse(sess, 'mouseReleased', p.x2, p.y2);
+  // 拖选 → 工具条弹出：busy 机器上真实指针事件会打断合成拖选（选区被清），重试 3 次
   let host = false;
-  for (let i = 0; i < 15 && !host; i++) { await sleep(200); host = !!await evalInPage(sess, `!!document.getElementById('om-sel-host')`); }
+  for (let attempt = 0; attempt < 3 && !host; attempt++) {
+    await evalInPage(sess, `document.getElementById('txt')?.scrollIntoView()`);
+    await sleep(200);
+    const p = JSON.parse(await evalInPage(sess, `(() => {
+      const node = document.createTreeWalker(document.getElementById('txt'), NodeFilter.SHOW_TEXT).nextNode();
+      const len = node.textContent.length;
+      const r1 = document.createRange(); r1.setStart(node, 0); r1.setEnd(node, 1);
+      const r2 = document.createRange(); r2.setStart(node, len - 1); r2.setEnd(node, len);
+      const a = r1.getBoundingClientRect(), b = r2.getBoundingClientRect();
+      return JSON.stringify({ x1: a.left, y1: a.top + a.height / 2, x2: b.right, y2: b.top + b.height / 2 });
+    })()`));
+    await mouse(sess, 'mousePressed', p.x1, p.y1);
+    for (let k = 1; k <= 8; k++) await mouse(sess, 'mouseMoved', p.x1 + (p.x2 - p.x1) * k / 8, p.y1);
+    await mouse(sess, 'mouseReleased', p.x2, p.y2);
+    for (let i = 0; i < 15 && !host; i++) { await sleep(200); host = !!await evalInPage(sess, `!!document.getElementById('om-sel-host')`); }
+  }
   if (!host) throw new Error(`${path}: 工具条未弹出`);
   const btn = JSON.parse(await evalInPage(sess, `(() => { const b = document.getElementById('om-sel-host').shadowRoot.querySelector('[data-act="highlight"]'); const r = b.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); })()`));
   await mouse(sess, 'mousePressed', btn.x, btn.y);

@@ -120,6 +120,32 @@ test('工具结果附件（PDF / 图片）：Anthropic 放进 tool_result，Open
   assert.equal(oa.at(-1).content[2].image_url.url, 'data:image/png;base64,iVBO');
 });
 
+test('user 消息图片附件（网页媒体理解）：两协议 wire 形状', async () => {
+  const msgs = [{ role: 'user', content: '分析这张图', attachments: [
+    { kind: 'image', mime: 'image/png', name: 'a.png', data: 'iVBO' },
+    { kind: 'image', mime: 'image/jpeg', name: 'b.jpg', data: '/9j/' },
+  ] }];
+  const oa = toOpenAiMessages(msgs);
+  assert.equal(oa.length, 1, 'user 附件不额外补消息');
+  assert.deepEqual(oa[0].content.map((p) => p.type), ['text', 'image_url', 'image_url']);
+  assert.equal(oa[0].content[1].image_url.url, 'data:image/png;base64,iVBO');
+  assert.equal(oa[0].content[2].image_url.url, 'data:image/jpeg;base64,/9j/');
+  const an = toAnthropicMessages(msgs);
+  assert.equal(an.length, 1);
+  assert.deepEqual(an[0].content.map((b) => b.type), ['text', 'image', 'image']);
+  assert.equal(an[0].content[1].source.media_type, 'image/png');
+  // 纯文本 user 消息仍回落为字符串（部分兼容网关只认字符串）
+  assert.equal(toAnthropicMessages([{ role: 'user', content: '纯文本' }])[0].content, '纯文本');
+  assert.equal(toOpenAiMessages([{ role: 'user', content: '纯文本' }])[0].content, '纯文本');
+
+  // 适配器全链路：附件经流式请求真实下发，mock 捕获原始 body
+  await collect(openAiAdapter, mock.url('a') + '/v1', { messages: msgs });
+  const raw = mock.requests.at(-1).raw;
+  const parts = raw.messages[0].content;
+  assert.equal(parts[0].text, '分析这张图');
+  assert.ok(parts[1].image_url.url.startsWith('data:image/png;base64,'));
+});
+
 test('streamChat：按 providerId 精确路由，同名模型不串到激活供应商', async () => {
   mem.llmSettings = {
     providers: [

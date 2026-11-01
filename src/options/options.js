@@ -152,23 +152,37 @@ async function refreshAgentOptions(client) {
     sel.appendChild(opt);
   }
   sel.value = agents.some((a) => a.id === prev) ? prev : '';
-  // 模型预设 datalist 动态化：经 bridge 拉 agent 背后 LLM 网关的模型列表，
-  // 拉到的接在别名后面；拉不到保留静态别名（手填不受影响）
-  const dl = $('#om-agent-model-presets');
-  dl.innerHTML = '<option value="opus"></option><option value="sonnet"></option><option value="haiku"></option>';
-  try {
-    const agentId = sel.value || agents.find((a) => a.authed)?.id;
-    if (agentId) {
-      const { models } = await client.listModels(agentId);
-      for (const id of models.slice(0, 50)) {
-        const opt = document.createElement('option');
-        opt.value = id;
-        dl.appendChild(opt);
-      }
-    }
-  } catch { /* 网关不支持 /v1/models 时静默回退别名 */ }
+  await refreshAgentModelPresets(client, sel.value || agents.find((a) => a.authed)?.id);
   return agents;
 }
+
+// 模型预设 datalist 动态化：经 bridge 拉 agent 背后 LLM 网关的模型列表。
+// 静态别名按 agent 家族区分：claude 系认 opus/sonnet/haiku；codex 系模型名迭代快，
+// 离线时不硬编码错误名字（拉不到就留空 datalist，手填不受影响）
+async function refreshAgentModelPresets(client, agentId) {
+  const dl = $('#om-agent-model-presets');
+  const aliases = agentId && String(agentId).startsWith('codex') ? [] : ['opus', 'sonnet', 'haiku'];
+  dl.innerHTML = aliases.map((v) => `<option value="${v}"></option>`).join('');
+  if (!agentId) return;
+  try {
+    const { models } = await client.listModels(agentId);
+    for (const id of models.slice(0, 50)) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      dl.appendChild(opt);
+    }
+  } catch { /* 网关不支持 /v1/models 时静默回退别名 */ }
+}
+
+// 切换「默认 agent」：模型预设同步换列表，避免 codex 下还提示 claude 的模型
+$('#om-agent-default').addEventListener('change', async () => {
+  try {
+    const { getAgentClient } = await import('../agent/client.js');
+    const client = getAgentClient({ onStatus: connListener });
+    await client.ensureReady();
+    await refreshAgentModelPresets(client, $('#om-agent-default').value);
+  } catch { /* bridge 未连接时保留静态别名 */ }
+});
 
 $('#om-agent-test').addEventListener('click', () => withButton($('#om-agent-test'), '检测中…', async () => {
   agentResult.textContent = '连接中…';

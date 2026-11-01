@@ -21,6 +21,80 @@ export function buildSummaryPrompt({ title, url, text }) {
   ].join('\n');
 }
 
+// ---- 划词思维导图 ----
+
+export const MINDMAP_MAX_CHARS = 12000;
+
+// 颗粒度与结构约束（两种生成模式共用，防「零碎拆解」：用户报障过整句被拆成单词级节点）
+const MINDMAP_GRAIN_RULES = [
+  `2. 颗粒度宁整勿碎：叶子节点表达一个完整要点（可独立看懂的关键短句，一般 8~25 字），严禁把一句话拆成单词级子节点、严禁开同义重复的分支；一个父节点下子节点以 2~6 个为宜，没有真正的子结构就不要再加一层`,
+  `3. 分支结构按网页原文的章节脉络组织：原文的章节/主题对应上级分支，相邻或同主题的内容归纳合并到同一支下，不逐条机械映射`,
+];
+
+// 让模型把高亮片段整理成 markdown 无序列表（查看页解析成树渲染）。
+// text 是页面正文快照（上下文，可空），highlights 是组装好的高亮片段（重点）。
+// 输出格式与 .md 导出格式同构：重新解析导出文件可还原同一棵树。
+// 叶子节点带〔片段n〕出处标注（查看页 splitRef 渲染成小字角标）。
+export function buildMindmapPrompt({ title, text, highlights }) {
+  const ctx = (text || '').slice(0, MINDMAP_MAX_CHARS);
+  const hl = (highlights || '').slice(0, MINDMAP_MAX_CHARS);
+  return [
+    `根据对下面网页内容的理解，把用户在其中高亮标注的片段整理成一篇思维导图大纲。要求：`,
+    `1. 只输出一个 markdown 无序列表：顶层条目是主题分支，子条目每级缩进 2 个空格；顶层 3~6 个分支，总层级不超过 4 级；不要输出任何解释、开场白或总结`,
+    ...MINDMAP_GRAIN_RULES,
+    `4. 用户高亮的片段是重点内容：所有片段的要点必须保留（可归纳合并，不可遗漏）；网页里没被高亮的部分不要单独成支；忠实反映要点，不要编造原文没有的信息`,
+    `5. 出处标注：来自高亮片段的叶子节点，末尾标注来源片段编号，如〔片段2〕，多个来源写成〔片段1、片段3〕；由上下文推理补全的节点不标注；素材里没有【片段n】编号时不标注`,
+    `6. 用简体中文概括；专有名词、术语、代码标识符保留原文`,
+    ``,
+    `网页标题：${title || '（无标题）'}`,
+    ``,
+    ctx ? `网页正文（供理解上下文，可能截断）：\n${ctx}` : `（没有网页正文上下文，直接整理下面的片段）`,
+    ``,
+    `【高亮片段】：`,
+    hl,
+  ].join('\n');
+}
+
+// 整页模式：不用高亮素材，直接把整篇网页正文整理成思维导图。
+// 出处标注用〔§小节名〕（原文的小节标题即出处）。
+export function buildMindmapFullPrompt({ title, text }) {
+  const ctx = (text || '').slice(0, MINDMAP_MAX_CHARS);
+  return [
+    `把下面这篇网页的完整内容整理成一篇思维导图大纲。要求：`,
+    `1. 只输出一个 markdown 无序列表：顶层条目是主题分支，子条目每级缩进 2 个空格；顶层 3~8 个分支，总层级不超过 4 级；不要输出任何解释、开场白或总结`,
+    ...MINDMAP_GRAIN_RULES,
+    `4. 忽略导航栏、目录、页脚、版权声明、广告等与正文无关的内容；忠实反映原文要点，不要编造`,
+    `5. 出处标注：叶子节点末尾标注其内容所在的原文小节，如〔§小节名〕（小节名过长可截短到 12 字内）；没有明确小节归属的叶子不标注`,
+    `6. 用简体中文概括；专有名词、术语、代码标识符保留原文`,
+    ``,
+    `网页标题：${title || '（无标题）'}`,
+    ``,
+    `网页正文（整页快照，可能截断）：`,
+    ctx || `（没有网页正文）`,
+  ].join('\n');
+}
+
+// ---- 网页媒体理解（图片 / 视频关键帧，附件随 user 消息下发） ----
+
+// mode：'analyze' 分析内容 | 'extract' 逐字提取（OCR/表格/代码）| 'describe' 一句话概括（进导图素材）
+export function buildImagePrompt({ mode, alt = '', src = '' }) {
+  const asks = {
+    analyze: '请分析这张网页图片：主体是什么、有哪些关键信息 / 数据 / 结论，用中文分点简明输出。图里看不清或没有的内容不要编造。',
+    extract: '请把这张图片里的内容完整提取成文本：图中所有文字逐字保留（标题、标注、图例、坐标轴刻度、表格单元格都算），表格输出 markdown 表格，代码 / 命令输出代码块；纯图形部分各用一句话描述。不要遗漏、不要编造。',
+    describe: '请用一两句话概括这张图片的内容要点，作为思维导图的素材使用；不要编造。',
+  };
+  const ctx = [alt && `图片说明：${alt}`, src && !src.startsWith('data:') && `图片来源：${src}`].filter(Boolean);
+  return [asks[mode] || asks.analyze, ...ctx, '图片见本消息附带的图片内容。'].filter(Boolean).join('\n');
+}
+
+// 视频按时间轴抽关键帧后整包给视觉模型：mode 'analyze' 看内容演进 / 'extract' 逐帧提文字
+export function buildVideoFramesPrompt({ mode, count, note = '' }) {
+  const ask = mode === 'extract'
+    ? '请按时间顺序逐帧查看这些视频关键帧，把画面里出现的所有文字逐字提取出来（字幕、标题、界面文案都算），并标注出现的先后顺序；纯图形内容用一句话概括。不要编造。'
+    : '请按时间顺序查看这些视频关键帧，分析视频的主题与内容演进：讲的是什么、按先后发生了什么、有哪些关键信息或结论，用中文分点简明输出。看不清的不要编造。';
+  return [ask, `共 ${count} 帧，按时间先后排列${note ? `（${note}）` : ''}。`].join('\n');
+}
+
 // ---- 翻译批处理 ----
 
 export const TRANSLATE_BATCH_CHARS = 2400;
@@ -129,6 +203,23 @@ if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWit
   };
   const P = buildSummaryPrompt({ title: 'T', url: 'https://x', text: 'hello' });
   assert('总结 prompt 含标题与正文', P.includes('T') && P.includes('hello') && P.includes('要点'));
+
+  const MP = buildMindmapPrompt({ title: '导图主题', text: '网页正文', highlights: '【片段1】\n高亮A' });
+  assert('导图 prompt 含标题/上下文/片段与格式要求', MP.includes('导图主题') && MP.includes('网页正文') && MP.includes('高亮A') && MP.includes('【高亮片段】') && MP.includes('无序列表'));
+  assert('导图 prompt 无上下文时降级说明', buildMindmapPrompt({ title: 'T', highlights: '片段内容' }).includes('没有网页正文上下文'));
+  assert('导图 prompt 颗粒度与出处约束', MP.includes('宁整勿碎') && MP.includes('单词级') && MP.includes('章节脉络') && MP.includes('〔片段2〕') && MP.includes('不可遗漏'));
+  const MF = buildMindmapFullPrompt({ title: '整页主题', text: '整页正文' });
+  assert('整页 prompt 含正文/结构/出处要求', MF.includes('整页快照') && MF.includes('整页正文') && !MF.includes('【高亮片段】') && MF.includes('宁整勿碎') && MF.includes('〔§小节名〕') && MF.includes('导航栏'));
+  assert('整页 prompt 无正文降级说明', buildMindmapFullPrompt({ title: 'T' }).includes('（没有网页正文）'));
+
+  const IA = buildImagePrompt({ mode: 'analyze', alt: '架构图', src: 'https://x/i.png' });
+  assert('图片分析 prompt：要求/说明/来源', IA.includes('分析这张网页图片') && IA.includes('架构图') && IA.includes('https://x/i.png') && IA.includes('不要编造'));
+  assert('图片提取 prompt：逐字与表格要求', buildImagePrompt({ mode: 'extract' }).includes('逐字保留') && buildImagePrompt({ mode: 'extract' }).includes('markdown 表格'));
+  assert('图片一句话 prompt（进导图素材）', buildImagePrompt({ mode: 'describe', alt: '', src: 'data:image/png;base64,x' }).includes('一两句话概括')
+    && !buildImagePrompt({ mode: 'describe', alt: '', src: 'data:image/png;base64,x' }).includes('data:image'));
+  const VP = buildVideoFramesPrompt({ mode: 'analyze', count: 4, note: '时长约 60 秒' });
+  assert('视频关键帧 prompt：帧数/顺序/注记', VP.includes('关键帧') && VP.includes('共 4 帧') && VP.includes('时长约 60 秒'));
+  assert('视频提取 prompt：逐帧提文字', buildVideoFramesPrompt({ mode: 'extract', count: 3 }).includes('逐字提取'));
 
   const items = [{ id: 'a', text: 'Hello world' }, { id: 'b', text: 'Goodbye' }];
   const tp = buildTranslateBatchPrompt({ items, targetLang: '中文' });

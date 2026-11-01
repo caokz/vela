@@ -2,6 +2,7 @@
 // 不做网络请求——流式 fetch 与页面功能编排全在面板/聊天页上下文里执行，规避 MV3 SW 30 秒回收。
 
 import { loadSettings, DEFAULT_QUICK_ACTIONS } from '../llm/store.js';
+import { DRAFT_KEY, DRAFT_MAX_PAGES, PAGE_CTX_MAX, pageKeyOf, addItem, removeItems, setPageText } from '../mindmap/draft.js';
 
 const MENU_ROOT = 'om-root';
 const MENU_CHAT_TAB = 'om-chat-tab';
@@ -128,7 +129,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch(() => sendResponse({ ok: false }));
     return true; // 异步 sendResponse
   }
+  if (msg?.type === 'om:mindmap-collect') {
+    collectMindmap(msg, sender.tab)
+      .then((res) => sendResponse(res ?? { ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true; // 异步 sendResponse
+  }
 });
+
+// 高亮 → 本页思维导图素材库（omMindmapInbox，按页 key 聚合）。只写 storage 属路由职责，
+// 不碰网络；页来源以 sender 标签页为准（页 key 不可信内容拼不出来）。条目清空即删，
+// 防无限增长按 updatedAt 淘汰最久未更新的页。
+async function collectMindmap(msg, tab) {
+  const texts = (Array.isArray(msg?.texts) ? msg.texts : [msg?.texts])
+    .map((t) => String(t || ''))
+    .filter((t) => t.trim())
+    .slice(0, 20);
+  if (!texts.length) return { ok: false };
+  const key = pageKeyOf(tab?.url || msg?.url || '');
+  if (!/^https?:/i.test(key)) return { ok: false, reason: 'not-web-page' };
+  const title = String(msg?.title || tab?.title || '').slice(0, 200);
+  const o = await chrome.storage.local.get(DRAFT_KEY);
+  const all = o[DRAFT_KEY] || {};
+  const cur = all[key] || { url: key, title: '', items: [] };
+  const page = msg.op === 'remove' ? removeItems(cur, texts) : addItem(cur, { texts, title, ts: Date.now() });
+  if (page.items.length) all[key] = page;
+  else delete all[key];
+  const keys = Object.keys(all);
+  if (keys.length > DRAFT_MAX_PAGES) {
+    keys.sort((a, b) => (all[a].updatedAt || 0) - (all[b].updatedAt || 0));
+    for (const k of keys.slice(0, keys.length - DRAFT_MAX_PAGES)) delete all[k];
+  }
+  await chrome.storage.local.set({ [DRAFT_KEY]: all });
+  return { ok: true, count: page.items.length };
+}
 
 async function resolveQuickAction(actionId) {
   const { quickActions } = await loadSettings();
@@ -157,6 +191,38 @@ async function handleWidgetAction(msg, tab) {
         ts,
       },
     });
+    return { ok: true };
+  }
+  if (msg.kind === 'mindmap') {
+    // 查看本页思维导图：任务参数一次性暂存 session 再开查看页（避开 URL 长度限制）。
+    // 高亮素材来自 omMindmapInbox（见 om:mindmap-collect）；生成由用户在查看页里显式点击，
+    // 流式生成也在查看页跑（MV3 约束，不进 SW）。内容脚本顺带带回页面正文快照，
+    // 存进素材页条目——高亮模式作 LLM 上下文，整页模式是生成原料；没有条目也建
+    //（items 为空）：整页生成不需要任何高亮素材。同样按 updatedAt 淘汰防增长。
+    const url = tab?.url || '';
+    if (msg.pageText && /^https?:/i.test(url)) {
+      const o = await chrome.storage.local.get(DRAFT_KEY);
+      const all = o[DRAFT_KEY] || {};
+      const key = pageKeyOf(url);
+      all[key] = setPageText(all[key] || { url: key, title: String(tab?.title || msg?.title || '').slice(0, 200), items: [], updatedAt: ts },
+        { text: String(msg.pageText).slice(0, PAGE_CTX_MAX), ts });
+      const keys = Object.keys(all);
+      if (keys.length > DRAFT_MAX_PAGES) {
+        keys.sort((a, b) => (all[a].updatedAt || 0) - (all[b].updatedAt || 0));
+        for (const k of keys.slice(0, keys.length - DRAFT_MAX_PAGES)) delete all[k];
+      }
+      await chrome.storage.local.set({ [DRAFT_KEY]: all });
+    }
+    const jobId = `mmjob-${ts.toString(36)}`;
+    await chrome.storage.session.set({
+      [`omMindmapJob:${jobId}`]: {
+        view: 1,
+        url,
+        title: String(tab?.title || msg.title || ''),
+        ts,
+      },
+    });
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`src/mindmap/mindmap.html#job=${jobId}`) });
     return { ok: true };
   }
   if (msg.kind === 'quick-action') {

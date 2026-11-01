@@ -2,7 +2,8 @@
 // 覆盖：顶栏引擎切换与记忆、同名模型按供应商精确路由、刷新后会话引擎/模型恢复、
 // OpenAI 与 Anthropic 两种协议的工具调用、读当前网页、下载文件审批（允许 → 文件真实落盘）、
 // 联网读取审批（拒绝不发请求 / 勾选不再询问后自动放行）、流式中停止、停止的工具轮轨迹
-// 完整性（残缺轨迹会被服务端 400 拒掉，拼装时修复）、页面无未捕获异常。
+// 完整性（残缺轨迹会被服务端 400 拒掉，拼装时修复）、网页总结气泡折叠正文（全文仍发模型）、
+// 页面无未捕获异常。
 // 用法：node scripts/verify-llm-chat.mjs
 import { createServer } from 'node:http';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -38,6 +39,7 @@ const mock = await startMockLlm({
     const results = lastResult(req);
     const userText = [...req.messages].reverse().find((m) => m.role === 'user')?.text || '';
     if (/路由测试/.test(userText)) return { text: `[${req.prefix}] 路由OK` };
+    if (/请总结下面的网页内容/.test(userText)) return { text: '网页总结完成：这是测试文章的要点。' };
     if (/慢回答/.test(userText)) return { text: '慢'.repeat(1800), chunkDelayMs: 40 };
     if (/总结当前页面/.test(userText)) {
       if (!results) return { text: '我先读取页面。', toolCalls: [{ id: 'tu_page', name: 'get_current_page', arguments: {} }] };
@@ -311,6 +313,65 @@ try {
     }
   }
   check('重试请求的每个工具调用都有结果消息（残缺轨迹在拼装时修复）', !!retryReq && wireOk, `found=${!!retryReq}`);
+
+  // ---- 12. 网页总结：气泡折叠正文，全文仍发给模型 ----
+  // 经真实 pendingTask 管线触发（右键菜单/浮窗「总结此页」同路径）：活动标签切回网页，
+  // 聊天卡（可见实例）消费任务，summarizeCurrentTab 注入活动网页提取正文
+  {
+    const pageT = (await browser.targets()).find((t) => t.type === 'page' && t.url === `${WEB}/page`);
+    await browser.activate(pageT.id);
+    await sleep(600);
+    const sw3 = await browser.sw();
+    await sw3.evaluate(`chrome.tabs.query({ url: '${WEB}/page' }).then(([t]) => chrome.tabs.sendMessage(t.id, { type: 'om:open-card' })).then(() => 'ok')`);
+    sw3.close();
+    const cardT = await waitFor(async () => (await browser.targets()).find((t) => t.type === 'iframe' && t.url.includes('/src/sidepanel/sidepanel.html')), { timeout: 10000 });
+    check('网页总结：聊天卡就绪', !!cardT, cardT?.url);
+    if (cardT) {
+      const { connect } = await import('./lib/cdp.mjs');
+      const card = await connect(cardT.webSocketDebuggerUrl);
+      await card.send('Runtime.enable');
+      await waitFor(() => card.evaluate(`!!document.getElementById('om-engine')`));
+      // 独立会话做总结（引擎切 LLM 问答；续上的会话有消息则自动新建空对话）
+      await card.evaluate(`(() => { const s = document.getElementById('om-engine'); s.value = 'llm'; s.dispatchEvent(new Event('change')); return 1; })()`);
+      await sleep(500);
+      const sw4 = await browser.sw();
+      await sw4.evaluate(`chrome.storage.session.set({ pendingTask: { kind: 'page-summary' } }).then(() => 'ok')`);
+      sw4.close();
+      const cap = await waitFor(() => card.evaluate(`[...document.querySelectorAll('.om-msg-question')].at(-1)?.querySelector('.om-summary-cap')?.textContent || ''`), { timeout: 15000 });
+      check('网页总结：气泡渲染折叠指令行（不再铺整页正文）', cap === '总结这个网页', cap);
+      const bubble = await card.evaluate(`(() => {
+        const el = [...document.querySelectorAll('.om-msg-question')].at(-1);
+        return {
+          chip: el.querySelector('.om-chip a')?.textContent || '',
+          open: el.querySelector('.om-summary-src')?.open ?? null,
+          leaked: [...el.querySelectorAll('.om-body')].some((b) => b.textContent.includes('${PAGE_MARKER}')),
+          summaryLine: el.querySelector('.om-summary-src summary')?.textContent || '',
+        };
+      })()`);
+      check('网页总结：来源 chip 显示网页标题', bubble.chip === '测试文章', bubble);
+      check('网页总结：正文默认折叠、指令行不含正文标记', bubble.open === false && !bubble.leaked, bubble);
+      check('网页总结：折叠行标注正文字数', /网页正文 · \d+ 字/.test(bubble.summaryLine), bubble.summaryLine);
+      await card.evaluate(`[...document.querySelectorAll('.om-msg-question')].at(-1)?.querySelector('.om-summary-src summary').click()`);
+      const exp = await card.evaluate(`(() => {
+        const el = [...document.querySelectorAll('.om-msg-question')].at(-1);
+        return { open: el.querySelector('.om-summary-src')?.open, has: (el.querySelector('.om-agent-thought-body')?.textContent || '').includes('${PAGE_MARKER}') };
+      })()`);
+      check('网页总结：点开折叠可查看完整 prompt', exp.open === true && exp.has, exp);
+      const ans = await waitFor(async () => {
+        const t = await card.evaluate(`[...document.querySelectorAll('.om-msg-answer')].at(-1)?.querySelector('.om-body').innerText || ''`);
+        return /网页总结完成/.test(t) && t;
+      }, { timeout: 15000 });
+      check('网页总结：模型流式回复渲染', /网页总结完成/.test(ans || ''), ans);
+      const req = mock.requests.slice().reverse().find((r) => r.messages.some((m) => m.role === 'user' && /请总结下面的网页内容/.test(m.text || '')));
+      const full = req?.messages.find((m) => m.role === 'user' && /请总结下面的网页内容/.test(m.text || ''));
+      check('网页总结：发给模型的消息仍是完整 prompt（含全文）', !!full && full.text.includes(PAGE_MARKER), `len=${full?.text?.length ?? 0}`);
+      st = await store();
+      const sItem = st.conversations.flatMap((c) => c.items).find((i) => i.meta?.kind === 'page-summary');
+      check('网页总结：落库 content 全文 + meta.chars 字数', !!sItem && sItem.content.includes(PAGE_MARKER) && typeof sItem.meta.chars === 'number' && sItem.meta.chars > 0, { chars: sItem?.meta?.chars });
+      card.close();
+    }
+  }
+
 
   check('聊天页无未捕获异常', exceptions.length === 0, exceptions);
   chat.close();

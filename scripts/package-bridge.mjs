@@ -9,10 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { buildZip } from './lib/zip.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const manifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8'));
 const BRIDGE = join(ROOT, 'bridge');
+// 版本取 bridge/package.json（与扩展 manifest 各自独立维护）
+const pkg = JSON.parse(readFileSync(join(BRIDGE, 'package.json'), 'utf8'));
 const OUT_DIR = join(ROOT, 'dist');
-const OUT = join(OUT_DIR, `vela-bridge-${manifest.version}.zip`);
+const OUT = join(OUT_DIR, `vela-bridge-${pkg.version}.zip`);
 
 const EXCLUDE_DIRS = new Set(['node_modules']);
 const EXCLUDE_FILES = /\.(log|pid)$/i;

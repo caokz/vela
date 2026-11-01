@@ -26,7 +26,7 @@ const ENGINE_LABELS = { agent: 'Agent', llm: 'LLM 问答', 'llm-tools': 'LLM 任
 
 const PERSIST_THROTTLE_MS = 500;
 const AGENTS_CACHE_MS = 30000;
-const AGENT_NAMES = { 'claude-code': 'Claude Code' };
+const AGENT_NAMES = { 'claude-code': 'Claude Code', codex: 'Codex CLI' };
 // 流式正文的 Markdown 重渲染节流：每帧全量重解析是 O(n²)，长回答后期会卡
 const BODY_RENDER_MS = 250;
 
@@ -191,7 +191,15 @@ export async function createChatView() {
     }
     const settings = await loadSettings();
     const preferred = settings.agentBridge.defaultAgentId;
+    const prevAgent = R.agentSelect.value;
     if (authed.some((a) => a.id === preferred)) R.agentSelect.value = preferred;
+    // 重建选项可能换了所选 agent（程序设值不触发 change）：模型缓存按新 agent 重拉
+    if (R.agentSelect.value !== prevAgent) {
+      agentModels = null;
+      agentModelsAgent = '';
+      agentModelsAt = 0;
+      refreshAgentModels();
+    }
     // 默认项文字依赖探测回传的 CLI 默认模型，缓存刷新后重同步
     syncAgentModelOptions(conversations.find((c) => c.id === currentId));
     return agentsCache;
@@ -203,31 +211,43 @@ export async function createChatView() {
   let modelDefault = ''; // 设置页默认模型；留空=用 SDK/CLI 默认
   const PERM_LABELS = { default: '每步审批', acceptEdits: '自动接受编辑', bypassPermissions: '自动放行' };
   // 模型下拉选项经 bridge 的 models.list 动态拉取（agent 背后的 LLM 网关 /v1/models，
-  // 与 Orca 同思路）；拉不到时回退这三个别名，选项仍可手填覆盖
-  const MODEL_FALLBACKS = [['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+  // 与 Orca 同思路）；拉不到时回退别名。别名按 agent 家族区分：claude 系 CLI 认
+  // opus/sonnet/haiku；codex 系模型名随版本迭代快，离线时不硬编码错误名字，只留默认项
+  const MODEL_FALLBACKS = {
+    claude: [['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']],
+    codex: [],
+  };
+  const modelFallback = (agentId) => MODEL_FALLBACKS[String(agentId || '').startsWith('codex') ? 'codex' : 'claude'];
   let agentModels = null; // null=未拉到（bridge 离线/网关不支持），用回退别名
-  let agentModelsAt = 0; // 上次尝试时间；失败 60s 内不重试，避免每次引擎同步都打 bridge
+  let agentModelsAgent = ''; // 现列表对应的 agentId——切换 agent 后旧列表不能沿用
+  let agentModelsAt = 0; // 上次尝试时间；同一 agent 失败 60s 内不重试，避免每次引擎同步都打 bridge
 
   async function refreshAgentModels() {
-    if (agentModels || Date.now() - agentModelsAt < 60000) return;
+    const agentId = R.agentSelect.value || (await loadSettings()).agentBridge.defaultAgentId;
+    if (!agentId) { agentModels = null; agentModelsAgent = ''; agentModelsAt = 0; return; }
+    if (agentModels && agentModelsAgent === agentId) return;
+    if (agentModelsAgent === agentId && Date.now() - agentModelsAt < 60000) return;
+    agentModelsAgent = agentId;
     agentModelsAt = Date.now();
     try {
       await agentClient.ensureReady();
-      const agentId = R.agentSelect.value || (await loadSettings()).agentBridge.defaultAgentId;
-      if (!agentId) { agentModelsAt = 0; return; }
       const { models } = await agentClient.listModels(agentId);
-      if (Array.isArray(models) && models.length) {
-        agentModels = models.slice(0, 50);
-        syncAgentModelOptions(conversations.find((c) => c.id === currentId));
-      }
-    } catch { /* 回退预设，等下次引擎同步再试 */ }
+      // 新 agent 拉不到也不能沿用上一个 agent 的列表
+      agentModels = Array.isArray(models) && models.length ? models.slice(0, 50) : null;
+    } catch {
+      agentModels = null;
+    }
+    syncAgentModelOptions(conversations.find((c) => c.id === currentId));
   }
 
   // agent 模型下拉：动态模型列表 + 会话已存的自定义值；默认项文字带出真实落点
   // （设置页默认 > CLI 默认，即 env ANTHROPIC_MODEL——probe 探测回传）
   function syncAgentModelOptions(conv) {
     const cur = conv?.model || '';
-    const list = agentModels ? agentModels.map((id) => [id, id]) : MODEL_FALLBACKS;
+    // 只用当前所选 agent 拉到的列表（防 fetch 竞态：切 agent 后旧列表迟到）
+    const list = agentModels && agentModelsAgent === R.agentSelect.value
+      ? agentModels.map((id) => [id, id])
+      : modelFallback(R.agentSelect.value);
     const cliDefault = agentsCache.find((a) => a.id === R.agentSelect.value && a.authed)?.defaultModel || '';
     const eff = modelDefault || cliDefault;
     const opts = [['', eff ? `默认模型（${eff}）` : '默认模型'], ...list];
@@ -332,6 +352,16 @@ export async function createChatView() {
       if (v) c.model = v; else delete c.model;
     });
     showToast(R.toast, v ? `模型：${v}（下一轮生效）` : '模型：回到默认（下一轮生效）');
+  });
+
+  // 切换 agent：模型下拉立即按新 agent 重建（先回退别名），动态列表拉到后再刷新。
+  // 旧缓存必须清掉——claude 与 codex 背后的模型列表完全不同
+  R.agentSelect.addEventListener('change', () => {
+    agentModels = null;
+    agentModelsAgent = '';
+    agentModelsAt = 0;
+    syncAgentModelOptions(conversations.find((c) => c.id === currentId));
+    refreshAgentModels();
   });
 
   // agent 事件帧 → 当前 turn；断线重连后补帧
@@ -849,6 +879,23 @@ export async function createChatView() {
     if (item.type === 'question') {
       if (item.meta?.kind) wrap.appendChild(chipEl(item.meta));
       if (item.meta?.attachments?.length) wrap.appendChild(attachmentChipsEl(item.meta.attachments));
+      // 网页总结：prompt 里整页正文只以「一行指令 + 折叠原文」呈现，长页面不再刷屏。
+      // content 本身不动——发给模型 / 复制 / 导出 / 追问历史用的都是全文
+      if (item.meta?.kind === 'page-summary') {
+        const cap = document.createElement('div');
+        cap.className = 'om-body om-summary-cap';
+        cap.textContent = '总结这个网页';
+        const det = document.createElement('details');
+        det.className = 'om-agent-thought om-summary-src';
+        const sum = document.createElement('summary');
+        sum.textContent = `网页正文 · ${item.meta.chars || item.content.length} 字`;
+        const src = document.createElement('div');
+        src.className = 'om-agent-thought-body';
+        src.textContent = item.content;
+        det.append(sum, src);
+        wrap.append(cap, det);
+        return wrap;
+      }
       const body = document.createElement('div');
       body.className = 'om-body';
       body.textContent = item.content;

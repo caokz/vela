@@ -31,7 +31,13 @@ export function toAnthropicMessages(messages) {
       for (const c of m.toolCalls ?? []) blocks.push({ type: 'tool_use', id: c.id, name: c.name, input: c.arguments ?? {} });
       if (blocks.length) push('assistant', blocks);
     } else {
-      push('user', [{ type: 'text', text: String(m.content ?? '') }]);
+      // user 消息可带附件（图片理解）：文本块 + image / document 块
+      const blocks = [{ type: 'text', text: String(m.content ?? '') }];
+      for (const a of m.attachments ?? []) blocks.push({
+        type: a.kind === 'pdf' ? 'document' : 'image',
+        source: { type: 'base64', media_type: a.mime, data: a.data },
+      });
+      push('user', blocks);
     }
   }
   // 纯文本单块消息还原成字符串，保持与旧请求体一致（部分兼容网关只认字符串）

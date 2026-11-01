@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 一个仓库两个独立交付物：
 
-- **扩展本体**：Chrome MV3 扩展（`manifest.json` 在仓库根）。零构建、零第三方依赖，纯 ES module 由 Chrome 直加载。功能：聊天（原生侧边栏 / 独立聊天页 / 页内聊天卡）、网页总结、整页翻译、划词动作。
-- **bridge/**：Node ≥18 伴生进程，独立 npm 项目（依赖 `ws` + `@anthropic-ai/claude-agent-sdk`）。WS 服务监听 `127.0.0.1:39217`，把本机 Claude Code CLI 经 Agent SDK 暴露给扩展页。不进扩展包，单独分发。
+- **扩展本体**：Chrome MV3 扩展（`manifest.json` 在仓库根）。零构建、零第三方依赖，纯 ES module 由 Chrome 直加载。功能：聊天（原生侧边栏 / 独立聊天页 / 页内聊天卡）、网页总结、整页翻译、划词动作、思维导图（划词高亮 / 整页正文）、网页图片 / 视频理解（悬停弹层）。
+- **bridge/**：Node ≥18 伴生进程，独立 npm 项目（依赖 `ws` + `@anthropic-ai/claude-agent-sdk`）。WS 服务监听 `127.0.0.1:39217`，把本机 agent CLI（Claude Code 经 Agent SDK、Codex 经 `codex app-server` JSON-RPC）暴露给扩展页。不进扩展包，单独分发。
 
 设计文档是权威参考，改协议或架构前先读：`docs/DESIGN.md`（扩展架构 / 数据模型 / 翻译协议 / 并发一致性）、`docs/agent-bridge.md`（WS 协议全部 op、归一化事件词汇表、bridge 模块职责）。
 
@@ -20,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd /d E:\code\vela\bridge && node index.js    # 或双击 bridge\start.bat；--port 可改端口
 
 # bridge 测试（都在 bridge/ 目录下跑）
-npm test                    # = node turn.test.js，hub 纯逻辑自测
+npm test                    # = node turn.test.js && node codex-adapter.test.js（hub 与 codex 适配器自测）
 node smoke.js               # 协议冒烟：进程内起 server + ws 客户端走关键 op（需先 npm i）
 node claude-options.test.js
 node live-check.js          # 真实 claude turn，产生真实调用，不进 CI
@@ -62,7 +62,7 @@ node scripts/make-icons.mjs      # 图标生成（零依赖 PNG 编码）
 
 ### 双引擎聊天（engine 是会话级字段；顶栏 `#om-engine` 切换：Agent / LLM 问答 / LLM 任务）
 
-- `engine:'llm'`：`streamChat`（`src/llm/store.js`）→ `openai.js` / `anthropic.js` 两协议 SSE 适配器，UI 只见归一化增量 `{text, finished, error, toolCalls?}`（每次请求 finished 只发一次）；`sse.js` 共用分帧解析。`tasks.js` 是总结 / 翻译 prompt 构建纯函数。会话记 `llmProviderId`/`llmModel`，发送时按 providerId 精确路由（不传则用激活供应商，翻译等页面功能走这条）。
+- `engine:'llm'`：`streamChat`（`src/llm/store.js`）→ `openai.js` / `anthropic.js` 两协议 SSE 适配器，UI 只见归一化增量 `{text, finished, error, toolCalls?}`（每次请求 finished 只发一次）；`sse.js` 共用分帧解析。`tasks.js` 是总结 / 翻译 prompt 构建纯函数。会话记 `llmProviderId`/`llmModel`，发送时按 providerId 精确路由（不传则用激活供应商，翻译等页面功能走这条）。user 消息可带 `attachments`（图片附件：OpenAI 序列化为 `image_url`、Anthropic 为 base64 `image` 块，纯文本消息仍序列化为字符串）——媒体面板的视觉理解走这条。
 - `llmMode:'tools'`（LLM 任务）：`tool-loop.js` 纯逻辑工具循环（参数校验、审批、步数上限、取消），`browser-tools.js` 7 个浏览器工具（读当前页 / 选中 / 标签页、联网读取、开标签、下载；后三个先弹审批卡）。事件复用 agent 归一化词汇，步骤存 `answer.meta.tools.steps`，与 agent 步骤同款渲染。
 - 聊天卡的网页上下文（`conv.pageCtx`）跟随宿主页：加载时与同标签页 SPA 换页时 widget 回传正文，`reconcileHostCtx`（chat-ui.js）空会话原地换、有消息的会话新建对话；`pendingTask` 只由可见实例消费。细节见 `docs/DESIGN.md`。
 - 知识库（会话级，三种引擎共用一个入口）：除 bridge 类条目（上传 / 本机路径，仅 Agent）外，新增 `kind:'handle'`——浏览器 File System Access 授权的本机文件夹 / 文件，句柄存 IndexedDB（`src/kb/store.js`，chrome.storage 存不了句柄），会话只记 `{id, name, handleKind, wsPath}`。发送时在用户手势内补授权（浏览器重启后会回到「询问」）。LLM 任务经 `src/llm/fs-tools.js` 读写（list / search / read / write / edit / load_skill，写入先弹 diff 审批）；LLM 问答把授权的单个文件附进 system；Agent 发送前由 `src/kb/sync.js` 增量上传到工作区 `wsPath`（bridge `upload.begin` 的 `overwrite`）。`src/kb/files.js` 按格式读取：文本带行号（UTF-8 失败退 GBK）、docx/xlsx/pptx 经 `zip.js` + `office.js` 转 Markdown、PDF / 图片作为工具结果附件交给模型原生读取。说明型 skill 放在知识库目录 `.vela/skills/<名>/SKILL.md`（只支持文档，MV3 禁止执行外部脚本）。
@@ -72,7 +72,7 @@ node scripts/make-icons.mjs      # 图标生成（零依赖 PNG 编码）
 
 ### bridge 内部链路
 
-`index.js`（启动 / 端口 / 单实例锁）→ `server.js`（token 自动配对、Origin 必须以 `chrome-extension://` 开头、id 配对请求 / 响应、分发 `upload.*`）→ `workspace.js`（工作区 `baseDir/<workspaceId>` 解析 + 分块上传状态机）→ `turn.js`（会话 hub：seq、500 帧环形缓冲、权限请求 / 应答）→ `agents/claude.js`（SDK 适配器，把 SDK 消息流归一化为事件）。新增 agent 只加 `bridge/agents/` 适配器，协议不动。
+`index.js`（启动 / 端口 / 单实例锁）→ `server.js`（token 自动配对、Origin 必须以 `chrome-extension://` 开头、id 配对请求 / 响应、分发 `upload.*`）→ `workspace.js`（工作区 `baseDir/<workspaceId>` 解析 + 分块上传状态机）→ `turn.js`（会话 hub：seq、500 帧环形缓冲、权限请求 / 应答）→ `agents/claude.js`（SDK 适配器，把 SDK 消息流归一化为事件）、`agents/codex.js`（spawn `codex app-server`，JSON-RPC 按行分帧，事件归一化同词汇表）。新增 agent 只加 `bridge/agents/` 适配器，协议不动。
 
 事件帧 `{type:'event', sessionId, seq, event}`；事件 kind 词汇表（`message_chunk` / `thought_chunk` / `tool_call` / `tool_call_update` / `plan` / `permission_request` / `session_info` / `usage` / `turn_end`）见 `docs/agent-bridge.md`。未知 kind 丢弃不报错——CLI 迭代快，容错优先。
 
@@ -81,6 +81,8 @@ node scripts/make-icons.mjs      # 图标生成（零依赖 PNG 编码）
 - `src/content/widget.js` + `selection-popup.js`：常驻浮窗与划词工具条，经 `scripting.registerContentScripts` 注册（http/https，persistAcrossSessions）。
 - `src/content/bridge.js`：翻译回填 + 浮球 + SPA 守卫，按需 files 注入（IIFE，禁 import）。
 - `src/content/injected.js`：自包含正文提取函数（executeScript func 注入，ISOLATED world）。
+- 划词思维导图：**高亮只记录、生成永远显式**。点「高亮」即把选中文本记入素材库 `chrome.storage.local` `omMindmapInbox`（按页 key 分组、去重、上限 100 段，`src/mindmap/draft.js` 纯函数，取消高亮同步移出）；两个入口：工具条「思维导图」钮与浮窗动作列「导图」钮（无需划词，像翻译一样常驻可见）——都只是查看入口，SW 顺带带回页面正文快照（快照前隐藏自身浮层，防 toast 文案混进正文；没有素材条目也建，items 为空——整页生成不需要高亮）写 `storage.session` `omMindmapJob:<id>` 后开 `src/mindmap/mindmap.html`。查看页双生成模式：高亮素材（`buildMindmapPrompt`，网页正文作上下文 +【片段n】编号片段，默认）与整页正文（`buildMindmapFullPrompt`，零高亮可用），顶栏「高亮导图 / 整页导图」切换钮（画布与输入视图都在）：当前模式钮禁用高亮为主色，切另一模式时同页该模式已有记录则直开（零 LLM 调用），没有才显式生成（`switchPageMode`）；「新导图」清空前记 `state.backId`，顶栏亮出「‹ 返回导图」退回。共用颗粒度规则（`MINDMAP_GRAIN_RULES` 宁整勿碎、按原文章节脉络组织、2~6 子节点，高亮要点不可遗漏），叶子出处标注〔片段n〕/〔§小节名〕由 `outline.js splitRef` 拆成 11px 灰色角标渲染（label 保留完整标注，编辑/导出不丢）。流式期间节流渐进渲染；成品按页 key 高亮/整页各一条存 `omMindmaps`（`rec.mode` 区分，老记录按 material 认领；指纹 `draftSig`（素材）/`textSig`（正文，`p` 前缀防互撞），没变重开零调用，变了仅状态提示；`#id=` 重开不调 LLM）。查看页支持就地改名（双击）、「编辑大纲」textarea 往返（`outline.js` 的解析与 `outlineToMarkdown` 同构）、折叠 / 平移缩放、导出 .md / FreeMind .mm（均纯函数，Node 可自测）。注意 SVG 元素没有 `hidden` 属性语义，必须 `toggleAttribute('hidden', bool)`，写 `el.hidden = false` 只会留一个无效 expando（画布空白一类问题的元凶）。
+- 网页媒体理解（Monica 式悬停交互，**悬停是唯一入口**，浮窗「媒体」大面板钮已按需求移除）：鼠标停在 ≥80px 的 `img`/`video` 上 200ms，其右上角浮出品牌紫圆钮（`#om-media-hover` shadow host）；点钮就地弹 `src/media/panel.html?mode=hover&kind=…&src=…` 单媒体弹层（`#om-media-pop` 扩展页 iframe，LLM 流式视觉调用 / 跨域图片字节 fetch / `chrome.downloads` 都在扩展页，SW 零参与；单媒体模式隐藏页签/重扫，✕ 经 `om:media-close` 请宿主收起），换悬停目标弹层就地重载（`popSrc` 对比）；弹层开着钮是锚不收起，弹层外点击 / ✕ / 再点钮收起（收起后指针仍压在媒体上时 Blink 重发 mouseover，钮会重新长出——合理行为）。`widget.js` 负责 blob 图片 canvas 转码、视频关键帧抽取（含 MediaRecorder webm `duration=Infinity` 的 `currentTime=1e7` 修复；MSE 流 `'seeked'` 后再等一拍 `requestVideoFrameCallback` 确认新帧上屏才画，否则拿到旧帧 / 半解码模糊帧），经 postMessage 对接（`om:media-img-req` / `om:media-frames-req`，iframe 在 shadow root 里，取 `contentWindow` 必须经 `.shadowRoot`；宿主消息来源白名单 `isMediaWin` = 当前悬停弹层，转码 / 截帧按 src **精确匹配**页面元素，匹配不到明确报错「目标已不在页面上」——不退回首个元素，那会悄悄分析到无关对象）。图片四动作：分析 / 提取（附件随 user 消息，`tasks.js buildImagePrompt`）/ 进导图（描述以 `【图片】` 前缀经既有 `om:mindmap-collect` 入素材库，已分析过直接复用，冷路径先跑一句话概括）/ 下载（URL 直交下载器，`filename` 生效；blob: 先转 data:）。视频 = 关键帧视觉分析（`buildVideoFramesPrompt`，直连文件可下载，流式 / MSE 只列出）。整页扫描清单与嵌入 iframe 播放器列举随大面板一并移除。`scripts/verify-media.mjs` 覆盖。
 - 翻译协议走 Port `'om-tx'`（`om:tx_start` / `om:tx_need` / `om:tx_batch` …），视口驱动：IntersectionObserver 上报进视口的块，编排页分批流式翻译后回填，滚动续译。编排页在扩展页或隐藏 runner iframe（`src/page/tx-runner.html`）。
 
 ## 约定与红线

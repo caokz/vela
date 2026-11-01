@@ -1,7 +1,8 @@
 // 页面常驻浮窗（Monica 式）：深色圆形动作钮列 + 品牌紫胶囊。
 // 经 chrome.scripting.registerContentScripts 注册进 http(s) 页面（ISOLATED world，经典 IIFE，禁 import）。
-// 动作不直接跑 LLM：sendMessage 交 SW 写 pendingTask，聊天卡由本浮窗打开并消费任务
-//（右键菜单动作、工具栏图标 / Ctrl+M 也走此管线：SW 发 om:open-card / om:toggle-card 通知本浮窗）。
+// 动作不直接跑 LLM：总结 / 解释 sendMessage 交 SW 写 pendingTask，聊天卡由本浮窗打开并消费任务
+//（右键菜单动作、工具栏图标 / Ctrl+M 也走此管线：SW 发 om:open-card / om:toggle-card 通知本浮窗）；
+// 翻译就地启动隐藏 runner；导图与媒体各有专属入口（SW 开查看页 / 悬停钮就地弹层）。
 (() => {
   'use strict';
   if (window.__omWidget) {
@@ -16,6 +17,9 @@
     if (alive) return;
     window.__omWidget.host?.remove();
     document.getElementById('om-card-host')?.remove();
+    document.getElementById('om-media-host')?.remove();
+    document.getElementById('om-media-hover')?.remove();
+    document.getElementById('om-media-pop')?.remove();
     document.getElementById('om-tx-runner-host')?.remove();
     window.__omWidget = null;
   }
@@ -30,6 +34,9 @@
     // 船帆 logo：与 src/ui/brand.js 同一组路径（内容脚本禁 import，手抄；改那里要同步改这里）
     logo: '<path d="M11.2 3.2 C15.6 6.6 18.3 11 18.8 15.8 L11.2 15.8 Z" fill="currentColor" stroke="none"/><path d="M9.6 6.4 L9.6 15.8 L4.4 15.8 C5.6 12.2 7.3 9 9.6 6.4 Z" fill="currentColor" stroke="none"/><path d="M3.4 17.4 L20.6 17.4 C19.7 19.7 17.7 21 15.3 21 L8.7 21 C6.3 21 4.3 19.7 3.4 17.4 Z" fill="currentColor" stroke="none"/><path d="M19.6 1.6 L20.15 3.35 L21.9 3.9 L20.15 4.45 L19.6 6.2 L19.05 4.45 L17.3 3.9 L19.05 3.35 Z" fill="currentColor" stroke="none"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
+    media: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 15.5l-4.5-4.5-6 6L7 13.5l-4 4"/>',
+    // 思维导图：中心节点分三支
+    mind: '<circle cx="5" cy="12" r="2.1"/><circle cx="17" cy="6" r="2.1"/><circle cx="17" cy="12" r="2.1"/><circle cx="17" cy="18" r="2.1"/><path d="M7.1 12h2.4M9.5 6v12M9.5 6h5.4M9.5 12h5.4M9.5 18h5.4"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   };
 
@@ -104,15 +111,16 @@
   }
 
   // 卡片贴右满高打开时浮窗列左移让位，收卡后回到右缘
-  function syncWidgetOffset(cardOpen) {
+  function syncWidgetOffset() {
     const host = window.__omWidget?.host;
-    if (host) host.style.right = cardOpen ? `calc(${CARD_WIDTH} + 12px)` : '10px';
+    if (!host) return;
+    host.style.right = document.getElementById(CARD_ID) ? `calc(${CARD_WIDTH} + 12px)` : '10px';
   }
 
   function closeChatCard() {
     document.getElementById(CARD_ID)?.remove();
     pillEl?.classList.remove('on');
-    syncWidgetOffset(false);
+    syncWidgetOffset();
   }
 
   function openChatCard() {
@@ -150,12 +158,298 @@
       <div class="wrap"><iframe src="${cardUrl}" title="Vela" allow="clipboard-write"></iframe></div>`;
     document.documentElement.appendChild(host);
     pillEl?.classList.add('on');
-    syncWidgetOffset(true);
+    syncWidgetOffset();
   }
 
   function toggleChatCard() {
     if (chatCardOpen()) closeChatCard();
     else openChatCard();
+  }
+
+  // ---------- 网页媒体：图片 / 视频悬停钮（Monica 式），唯一入口 ----------
+  // （原浮窗「媒体」大面板入口已按需求移除：整页扫描清单与嵌入播放器列举不再提供，
+  //  所有媒体交互都从悬停钮进。）鼠标移到媒体元素上，其右上角浮出操作钮，
+  // 点钮就地展开小弹层（媒体面板页的单媒体模式，?mode=hover），不离开图片即可
+  // 分析 / 提取 / 进导图 / 下载；本脚本做 blob 图片转码与视频截帧（必须在本页
+  // 上下文里碰页面元素），经 postMessage 对接。
+  const HOVER_BTN_ID = 'om-media-hover';
+  const HOVER_POP_ID = 'om-media-pop';
+  const HOVER_MIN = 80;      // 与面板扫描一致的最小边：小图标不悬停
+  const HOVER_SHOW_MS = 200; // 停留阈值：快速扫过不闪钮
+  const HOVER_HIDE_MS = 350; // 离开宽限：移向钮 / 弹层的路途不收起
+
+  let hoverEl = null;    // 当前悬停的 img / video
+  let hoverKind = '';    // 'img' | 'vid'
+  let hoverSrc = '';
+  let showTimer = 0;
+  let hideTimer = 0;
+  let popPinned = false; // 弹层打开期间钮是锚，不随离开收起
+  let popSrc = '';       // 弹层当前呈现的媒体 src：换目标重载而非关闭
+
+  const hoverBtnHost = () => document.getElementById(HOVER_BTN_ID) || null;
+  const hoverPopHost = () => document.getElementById(HOVER_POP_ID) || null;
+  const hoverPopFrame = () => document.getElementById(HOVER_POP_ID)?.shadowRoot?.querySelector('iframe')?.contentWindow || null;
+  // 媒体相关 postMessage 的来源白名单：仅悬停弹层 iframe
+  const isMediaWin = (w) => !!w && w === hoverPopFrame();
+
+  function mediaTargetOf(node) {
+    const el = node?.closest?.('img, video');
+    if (!el || !el.isConnected || el.closest('[id^="om-"]')) return null; // 扩展自身浮层不算
+    const src = String(el.currentSrc || el.src || '');
+    if (!src || /^(chrome-extension|moz-extension):/.test(src)) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width < HOVER_MIN && r.height < HOVER_MIN) return null;
+    return { el, kind: el.tagName === 'VIDEO' ? 'vid' : 'img', src };
+  }
+
+  function placeHoverBtn() {
+    if (!hoverEl) return;
+    const host = hoverBtnHost();
+    if (!host) return;
+    if (!hoverEl.isConnected) { host.remove(); return; }
+    const r = hoverEl.getBoundingClientRect();
+    host.style.left = `${Math.max(6, Math.round(r.right) - 40)}px`;
+    host.style.top = `${Math.max(6, Math.round(r.top) + 8)}px`;
+  }
+
+  function showHoverBtn() {
+    if (!hoverEl || !hoverEl.isConnected) return;
+    let host = hoverBtnHost();
+    if (!host) {
+      host = document.createElement('div');
+      host.id = HOVER_BTN_ID;
+      host.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:32px;height:32px;z-index:2147483645;';
+      const croot = host.attachShadow({ mode: 'open' });
+      croot.innerHTML = `
+        <style>
+          :host { all: initial; }
+          button {
+            all: initial; display: block; width: 32px; height: 32px; border-radius: 50%;
+            background: #6841EA; color: #fff; cursor: pointer;
+            box-shadow: 0 2px 10px rgba(20,10,60,.45), 0 0 0 2px rgba(255,255,255,.85);
+            animation: om-hover-in .15s ease;
+          }
+          button:hover { background: #5b35d1; }
+          button svg { margin: 7.5px; display: block; }
+          @keyframes om-hover-in { from { transform: scale(.6); opacity: 0; } }
+          @media (prefers-color-scheme: dark) { button { box-shadow: 0 2px 10px rgba(0,0,0,.5), 0 0 0 2px rgba(0,0,0,.6); } }
+        </style>
+        <button title="图片 / 视频操作（Vela）"></button>`;
+      const btn = croot.querySelector('button');
+      btn.appendChild(svg('media', 17));
+      btn.addEventListener('click', (ev) => { ev.stopPropagation(); toggleHoverPop(); });
+      btn.addEventListener('mouseenter', () => clearTimeout(hideTimer));
+      btn.addEventListener('mouseleave', scheduleHoverHide);
+      document.documentElement.appendChild(host);
+    }
+    placeHoverBtn();
+  }
+
+  function hideHoverBtn() {
+    clearTimeout(showTimer);
+    hoverEl = null;
+    hoverKind = '';
+    hoverSrc = '';
+    document.getElementById(HOVER_BTN_ID)?.remove();
+  }
+
+  function scheduleHoverHide() {
+    if (popPinned) return; // 弹层开着：钮是弹层的锚，保持
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(hideHoverBtn, HOVER_HIDE_MS);
+  }
+
+  function placeHoverPop() {
+    const host = hoverPopHost();
+    if (!host) return;
+    const b = document.getElementById(HOVER_BTN_ID)?.getBoundingClientRect();
+    const w = Math.min(400, innerWidth - 24);
+    const h = Math.min(486, innerHeight - 24); // wrap 实际高度（iframe 480 + 边框）
+    let left = b ? b.right - w : innerWidth - w - 12;
+    left = Math.max(12, Math.min(left, innerWidth - w - 12));
+    let top = b ? b.bottom + 8 : 12;
+    if (top + h > innerHeight - 8) top = Math.max(12, (b ? b.top : innerHeight) - h - 8);
+    host.style.left = `${Math.round(left)}px`;
+    host.style.top = `${Math.round(top)}px`;
+  }
+
+  function openHoverPop() {
+    if (!hoverEl || !hoverEl.isConnected) return;
+    let url;
+    try {
+      const q = new URLSearchParams({ mode: 'hover', kind: hoverKind, src: hoverSrc, url: location.href, title: document.title || '' });
+      if (hoverKind === 'img') {
+        q.set('w', String(hoverEl.naturalWidth || hoverEl.width || 0));
+        q.set('h', String(hoverEl.naturalHeight || hoverEl.height || 0));
+        q.set('alt', hoverEl.alt || '');
+      } else {
+        const kind = hoverEl.srcObject ? 'stream' : /^https?:/i.test(hoverSrc) ? 'direct' : hoverSrc.startsWith('blob:') ? 'stream' : 'other';
+        q.set('vk', kind);
+        q.set('dur', String(Number.isFinite(hoverEl.duration) && hoverEl.duration > 0 ? Math.round(hoverEl.duration * 10) / 10 : 0));
+        q.set('w', String(hoverEl.videoWidth || 0));
+        q.set('h', String(hoverEl.videoHeight || 0));
+      }
+      url = `${chrome.runtime.getURL('src/media/panel.html')}?${q}`;
+    } catch { return; }
+    popPinned = true;
+    popSrc = hoverSrc;
+    let host = hoverPopHost();
+    if (host) { // 悬停目标已换：弹层就地重载，不关再开
+      host.shadowRoot.querySelector('iframe').src = url;
+    } else {
+      host = document.createElement('div');
+      host.id = HOVER_POP_ID;
+      host.style.cssText = 'all:initial;position:fixed;left:0;top:0;z-index:2147483645;';
+      const croot = host.attachShadow({ mode: 'open' });
+      croot.innerHTML = `
+        <style>
+          :host { all: initial; }
+          .wrap {
+            border-radius: 14px; overflow: hidden; background: #fff;
+            border: 1px solid rgba(0,0,0,.1); box-shadow: 0 12px 40px rgba(0,0,0,.3);
+            animation: om-pop-in .16s ease;
+          }
+          iframe { display: block; width: min(400px, calc(100vw - 24px)); height: min(480px, calc(100vh - 48px)); border: 0; }
+          @keyframes om-pop-in { from { transform: translateY(6px); opacity: 0; } }
+          @media (prefers-color-scheme: dark) { .wrap { background: #1b1c1f; } }
+        </style>
+        <div class="wrap"><iframe src="${url}" title="Vela 图片 / 视频操作" allow="clipboard-write; downloads"></iframe></div>`;
+      document.documentElement.appendChild(host);
+    }
+    placeHoverPop();
+  }
+
+  function closeHoverPop() {
+    document.getElementById(HOVER_POP_ID)?.remove();
+    popPinned = false;
+    popSrc = '';
+    hideHoverBtn(); // 收弹层时指针多半已不在图上，钮一并收
+  }
+
+  function toggleHoverPop() {
+    if (hoverPopHost() && popSrc === hoverSrc) closeHoverPop();
+    else openHoverPop();
+  }
+
+  // mouseover 在 document 上连续触发即连续跟踪：命中媒体元素→亮钮；命中钮/弹层→按未离开；其余→宽限后收起
+  document.addEventListener('mouseover', (ev) => {
+    const onUi = ev.target === hoverBtnHost() || ev.target === hoverPopHost();
+    const t = onUi ? null : mediaTargetOf(ev.target);
+    if (t) {
+      const moved = t.el !== hoverEl;
+      hoverEl = t.el;
+      hoverKind = t.kind;
+      hoverSrc = t.src;
+      clearTimeout(hideTimer);
+      if (document.getElementById(HOVER_BTN_ID)) {
+        placeHoverBtn(); // 换了张图：钮跟着挪；弹层开着就一并跟过去，别盖住新目标
+        if (popPinned) placeHoverPop();
+      } else { clearTimeout(showTimer); showTimer = setTimeout(showHoverBtn, HOVER_SHOW_MS); }
+      return;
+    }
+    if (onUi) { clearTimeout(hideTimer); return; }
+    scheduleHoverHide();
+  });
+
+  // 页面滚动 / 缩放：钮与弹层跟随目标
+  let hoverRaf = 0;
+  const onHoverReflow = () => {
+    if (!hoverEl && !hoverPopHost()) return;
+    cancelAnimationFrame(hoverRaf);
+    hoverRaf = requestAnimationFrame(() => { placeHoverBtn(); placeHoverPop(); });
+  };
+  window.addEventListener('scroll', onHoverReflow, { passive: true, capture: true });
+  window.addEventListener('resize', onHoverReflow, { passive: true });
+
+  // 弹层外点击收起（capture 阶段判定；钮自身的点击在上面的守卫里放行）
+  document.addEventListener('click', (ev) => {
+    if (!hoverPopHost()) return;
+    if (ev.target === hoverPopHost() || ev.target === hoverBtnHost()) return;
+    closeHoverPop();
+  }, true);
+
+  // blob: 图片 → dataUrl：字节活在页面源里，扩展页 fetch 不到，只能本页 canvas 转码。
+  // 带 src 时精确匹配；匹配不到就明说——退回首张图片会把无关图片悄悄转码分析
+  function imgToDataUrl(src, idxHint = 0) {
+    return new Promise((resolve) => {
+      const list = [...document.images];
+      const img = src ? list.find((i) => (i.currentSrc || i.src) === src) : list[idxHint];
+      if (!img || !img.naturalWidth) { resolve({ ok: false, error: src ? '目标图片已不在页面上（站点可能已将其移除），请重新悬停后再试' : '页面里找不到该图片' }); return; }
+      try {
+        const scale = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.max(2, Math.round(img.naturalWidth * scale));
+        c.height = Math.max(2, Math.round(img.naturalHeight * scale));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve({ ok: true, dataUrl: c.toDataURL('image/png') });
+      } catch (e) {
+        resolve({ ok: false, error: '该图片受跨域保护，无法读取内容' });
+      }
+    });
+  }
+
+  // 视频截帧：seek 到时间点画 canvas（跨域无 CORS 头的视频会 taint，报错说明）。
+  // 'seeked' 只代表定位完成，MSE 流（bilibili 等）上新帧可能还没解码呈现，立刻画会
+  // 拿到旧帧或半解码的模糊帧：再等一拍 requestVideoFrameCallback 确认新帧已上屏，
+  // 慢解码 / 不支持该 API 的环境由超时与 rAF 兜底。
+  const frameShown = (v) => new Promise((resolve) => {
+    if (typeof v.requestVideoFrameCallback !== 'function') { requestAnimationFrame(() => requestAnimationFrame(resolve)); return; }
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    v.requestVideoFrameCallback(() => fin());
+    setTimeout(fin, 400);
+  });
+  const seekOnce = (v, t) => new Promise((resolve) => {
+    let done = false;
+    const fin = () => {
+      if (done) return;
+      done = true;
+      v.removeEventListener('seeked', fin);
+      frameShown(v).then(resolve);
+    };
+    v.addEventListener('seeked', fin);
+    try { v.currentTime = Math.max(0, Math.min(t, (v.duration || 1) - 0.05)); } catch { fin(); }
+    setTimeout(fin, 1600);
+  });
+
+  async function captureFrames(idx, want = 4, srcHint = '') {
+    // 悬停弹层只带 src：精确匹配；匹配不到就明说，不退回 vids[0]（那会截到无关视频）
+    const vids = [...document.querySelectorAll('video')];
+    const v = srcHint ? vids.find((x) => x.currentSrc === srcHint || x.src === srcHint) : vids[idx];
+    if (!v) return { ok: false, error: srcHint ? '目标视频已不在页面上（站点可能已将其移除），请重新悬停后再试' : '页面里找不到该视频' };
+    if (!v.videoWidth) return { ok: false, error: '视频还没有画面数据（稍等播放开始后再试）' };
+    // MediaRecorder 产出的 webm 元数据 duration=Infinity：seek 到超界时间逼出真实时长再复位。
+    // durationchange 在慢机器上可能迟迟不来：重试一次，两轮都失败就按单帧兜底
+    if (v.duration === Infinity) {
+      for (let i = 0; i < 2 && v.duration === Infinity; i++) {
+        await new Promise((resolve) => {
+          const fin = () => { v.removeEventListener('durationchange', fin); resolve(); };
+          v.addEventListener('durationchange', fin);
+          try { v.currentTime = 1e7; } catch { fin(); }
+          setTimeout(fin, 1800);
+        });
+      }
+      await seekOnce(v, 0);
+    }
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+    const times = dur > 0 ? [0.04, dur * 0.25, dur * 0.5, dur * 0.75, dur * 0.96] : [v.currentTime || 0];
+    const orig = v.currentTime;
+    const frames = [];
+    try {
+      for (const t of times.slice(0, Math.max(2, Math.min(want, 5)))) {
+        await seekOnce(v, t);
+        const scale = Math.min(1, 768 / Math.max(v.videoWidth, v.videoHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.max(2, Math.round(v.videoWidth * scale));
+        c.height = Math.max(2, Math.round(v.videoHeight * scale));
+        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        frames.push({ t: Math.round((v.currentTime || 0) * 10) / 10, dataUrl: c.toDataURL('image/jpeg', 0.82) });
+      }
+      if (dur > 0) await seekOnce(v, orig); // 还原播放位置，不打扰用户
+      return { ok: true, frames };
+    } catch {
+      return { ok: false, error: '视频受跨域保护，无法截帧分析' };
+    }
   }
 
   // ---------- 宿主页正文提炼（供聊天卡作会话上下文） ----------
@@ -175,6 +469,23 @@
     const text = ((best || document.body).innerText || '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 6000);
     for (const [n, d] of hidden) n.style.display = d;
     return { title: document.title || '', url: location.href, text };
+  }
+
+  // 浮窗「导图」钮带回的页面正文快照：与划词工具条同款（innerText 已排除脚本/样式，
+  // 压掉连续空行再截断）。快照前先隐藏扩展自身浮层（本浮窗 / 聊天卡 / 悬停钮 / 划词
+  // 工具条等），否则提示文案会混进正文。
+  function snapshotPageText() {
+    const own = [...document.querySelectorAll(
+      '#om-widget-host, #om-card-host, #om-tx-runner-host, #om-media-hover, #om-media-pop, '
+      + '#om-sel-host, #om-sel-panel-host, #om-sel-cbtn-host, #om-sel-hlbtn-host, #om-mm-collect-toast',
+    )];
+    const prev = own.map((n) => n.style.display);
+    own.forEach((n) => { n.style.display = 'none'; });
+    try {
+      return (document.body?.innerText || '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12000);
+    } finally {
+      own.forEach((n, i) => { n.style.display = prev[i]; });
+    }
   }
 
   // 原生侧边栏 / 独立聊天页打开时（后台广播）：收起页内聊天卡，避免两个聊天窗并存
@@ -485,6 +796,7 @@
         <button class="act" data-act="page-summary" title="总结此页"></button>
         <button class="act" data-act="translate-page" title="翻译此页"></button>
         <button class="act" data-act="quick-action" title="解释选中文字"></button>
+        <button class="act" data-act="mindmap" title="本页思维导图：划词高亮素材 / 整页正文生成导图（无需选中文字）"></button>
         <button class="pill" data-act="open-panel" title="展开 / 收起本页聊天卡">
           <span class="logo"></span><span>AI 助手</span>
           <span class="dismiss" role="button" title="隐藏浮窗（刷新页面后恢复）"></span>
@@ -494,6 +806,7 @@
     root.querySelector('[data-act="page-summary"]').appendChild(svg('doc', 17));
     root.querySelector('[data-act="translate-page"]').appendChild(svg('translate', 17));
     root.querySelector('[data-act="quick-action"]').appendChild(svg('explain', 17));
+    root.querySelector('[data-act="mindmap"]').appendChild(svg('mind', 17));
     root.querySelector('.pill .logo').appendChild(svg('logo', 16));
     root.querySelector('.dismiss').appendChild(svg('close', 9));
     pillEl = root.querySelector('.pill');
@@ -516,6 +829,13 @@
       if (!btn || btn.classList.contains('dismiss')) return;
       if (btn.dataset.act === 'open-panel') {
         try { toggleChatCard(); } catch { hint(root, '无法打开聊天卡，请刷新页面后重试'); }
+        return;
+      }
+      // 本页思维导图：与划词工具条同管线（带正文快照交 SW 开查看页），不开聊天卡
+      if (btn.dataset.act === 'mindmap') {
+        busyBtn = btn;
+        btn.classList.add('active');
+        send({ type: 'om:widget-action', kind: 'mindmap', from: 'widget', pageText: snapshotPageText() }, onActionRes);
         return;
       }
       // 翻译按钮是开关（Monica 式）：已翻译再点 = 还原原文并撤掉编排。
@@ -570,6 +890,7 @@
       e.stopPropagation();
       host.remove();
       closeChatCard();
+      closeHoverPop();
     });
 
     // 翻译进行中让位给浮球（bridge 广播，旧版 bridge 只有这一条）
@@ -611,6 +932,22 @@
     }, 1000);
     window.addEventListener('message', (ev) => {
       const d = ev.data;
+      // 悬停弹层（本页 iframe）请求：blob 图转码 / 视频截帧。来源必须是弹层自己的 iframe
+      if (d?.type === 'om:media-close') {
+        // 悬停弹层点「✕」请求收起：只认弹层自己的窗口
+        if (ev.source === hoverPopFrame()) closeHoverPop();
+        return;
+      }
+      if (d?.type === 'om:media-img-req') {
+        if (isMediaWin(ev.source)) imgToDataUrl(String(d.src || ''), Number(d.idx) || 0)
+          .then((out) => { try { ev.source.postMessage({ type: 'om:media-img', src: d.src, ...out }, '*'); } catch { /* 面板已关 */ } });
+        return;
+      }
+      if (d?.type === 'om:media-frames-req') {
+        if (isMediaWin(ev.source)) captureFrames(Number(d.idx) || 0, Number(d.count) || 4, String(d.src || ''))
+          .then((out) => { try { ev.source.postMessage({ type: 'om:media-frames', src: d.src, ...out }, '*'); } catch { /* 面板已关 */ } });
+        return;
+      }
       // 聊天卡索取宿主页正文：提炼后回传，由卡片挂到会话作为网页上下文（减少无上下文幻觉）
       if (d?.type === 'om:card-ctx-req') {
         if (ev.source === cardFrame()) {

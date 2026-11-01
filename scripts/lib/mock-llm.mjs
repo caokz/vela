@@ -17,9 +17,11 @@ export function normalizeRequest(protocol, prefix, body) {
         if (last?.role === 'tool') last.toolResults.push(tr);
         else messages.push({ role: 'tool', text: '', toolResults: [tr] });
       } else {
+        // content 可能是块数组（视觉：text + image_url）：text 部分并入 text 供 respond 路由
         messages.push({
           role: m.role,
-          text: typeof m.content === 'string' ? m.content : '',
+          text: typeof m.content === 'string' ? m.content
+            : Array.isArray(m.content) ? m.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') : '',
           toolCalls: (m.tool_calls ?? []).map((c) => ({ id: c.id, name: c.function?.name, arguments: c.function?.arguments })),
           toolResults: [],
         });

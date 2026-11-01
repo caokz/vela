@@ -5,6 +5,8 @@
 // 另有代码块 hover 胶囊（解释 + 复制）：无需选中，悬停 <pre> 右上角出现。
 // 高亮是本地 DOM 动作：选区 Range 在弹出时克隆缓存，点击动作不依赖活选区
 // （真实点击瞬间浏览器可能清掉选区，getRangeAt 会抛异常——这是旧版「点了没反应」的根因）。
+// 高亮/取消同时把内容增量报给 SW 存进本页思维导图素材库（omMindmapInbox），
+// 工具条「思维导图」钮只负责打开本页查看页（生成/比对在查看页里做）。
 (() => {
   'use strict';
   if (window.__omSelPopup) {
@@ -48,6 +50,7 @@
     hl: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     translate: '<path d="M3 5h9M7.5 5c0 4.5-2 8.5-4.5 10.5M4.5 9.5c1.6 3 4 5.2 7 6"/><path d="M12.5 19.5l4-10 4 10M14 16.5h5"/>',
     summary: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
+    mind: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="1.9"/><circle cx="19" cy="12" r="1.9"/><circle cx="19" cy="19" r="1.9"/><path d="M7 11.2C11 8 12 5.5 17 5M7 12h12M7 12.8c4 3 6 3.7 12 6.2"/>',
     ask: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.5 8.5 0 1 1 16.1-3.8z"/>',
     code: '<path d="M8 6l-5 6 5 6M16 6l5 6-5 6"/>',
     spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>',
@@ -174,6 +177,39 @@
     span.style.cssText += `;box-shadow:inset 0 0 0 999px ${c.bg} !important;outline:2px solid ${c.bg} !important;outline-offset:-2px;`;
   }
 
+  // ---------- 高亮 → 本页思维导图素材（写库走 SW，本地只报增量 + 轻提示） ----------
+  function collectMindmap(op, texts) {
+    const list = (Array.isArray(texts) ? texts : [texts])
+      .map((t) => String(t || '').slice(0, 4000))
+      .filter((t) => t.trim());
+    if (!list.length) return;
+    send({
+      type: 'om:mindmap-collect',
+      op,
+      texts: list,
+      url: location.href.split('#')[0],
+      title: (document.title || '').slice(0, 200),
+    }, (res) => {
+      if (op !== 'add' || !res?.ok) return; // 移除静默；失败不打扰（高亮本身已生效）
+      showCollectToast(`已记入本页导图素材 · 共 ${res.count} 段`);
+    });
+  }
+
+  let collectToastTimer = 0;
+  function showCollectToast(text) {
+    let t = document.getElementById('om-mm-collect-toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'om-mm-collect-toast';
+      t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483646;max-width:360px;padding:8px 14px;background:#3a3450;color:#fff;border-radius:8px;font:12.5px/1.5 system-ui,"Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;opacity:0;transition:opacity .18s ease;';
+      (document.body || document.documentElement).appendChild(t);
+    }
+    t.textContent = text;
+    requestAnimationFrame(() => { t.style.opacity = '1'; });
+    clearTimeout(collectToastTimer);
+    collectToastTimer = setTimeout(() => { t.style.opacity = '0'; }, 2400);
+  }
+
   // 摘掉单个高亮 span：子节点提回父级后 normalize 合并被切分的文本节点
   function unwrapSpan(s) {
     const p = s.parentNode;
@@ -196,11 +232,18 @@
   function toggleHighlight(st) {
     ensureHlStyle();
     if (st.anchorEl?.closest('.om-hl') && st.focusEl?.closest('.om-hl')) {
+      // 取消高亮：先取被摘 span 的文本再解包（素材库同步移除）
+      const removed = [];
+      for (const r of st.ranges) {
+        for (const s of [...document.querySelectorAll('.om-hl')].filter((x) => r.intersectsNode(x))) removed.push(s.textContent);
+      }
       for (const r of st.ranges) unwrapHighlights(r);
       hideHlBtn();
+      if (removed.some((t) => t.trim())) collectMindmap('remove', removed);
       return;
     }
     hideHlBtn();
+    const added = [];
     let first = null;
     for (const range of st.ranges) {
       const wrap = document.createElement('span');
@@ -209,9 +252,13 @@
       try {
         wrap.appendChild(range.extractContents());
         range.insertNode(wrap);
-        if (!first && wrap.isConnected && wrap.textContent.trim()) first = wrap;
+        if (wrap.isConnected && wrap.textContent.trim()) {
+          if (!first) first = wrap;
+          added.push(wrap.textContent); // 素材取自实际落 DOM 的 span（跨节点切分后仍与选区一致）
+        }
       } catch { /* 跨特殊节点切不动就跳过这一段 */ }
     }
+    if (added.length) collectMindmap('add', added);
     // 即时反馈：高亮生成后直接挂出悬停胶囊（Monica 式），不用再悬停一次才能看到操作项
     if (first) { showHlBtn(first); diagnoseHl(first); }
   }
@@ -237,7 +284,8 @@
       try { console.warn(`[Vela] 高亮颜色未生效 v${VER} | ${msg}`); } catch { /* 页面禁 console */ }
       const t = document.createElement('div');
       t.id = 'om-hl-diag';
-      t.textContent = `[Vela] 高亮颜色未生效：${msg}`;
+      // 文案带版本号：报障截图一眼可分辨新旧内容脚本（旧页面不刷新会一直跑旧代码）
+      t.textContent = `[Vela v${VER}] 高亮颜色未生效：${msg}`;
       t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:440px;padding:10px 14px;background:#2b1c1c;color:#ffb4ab;border:1px solid #f28b82;border-radius:8px;font:13px/1.5 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3)';
       (document.body || document.documentElement).appendChild(t);
       setTimeout(() => t.remove(), 12000);
@@ -440,6 +488,7 @@
         ['highlight', 'hl', '高亮（再点已高亮内容可取消）'],
         ['translate', 'translate', '翻译选中文字'],
         ['summary', 'summary', '总结选中文字'],
+        ['mindmap', 'mind', '查看本页思维导图：划词高亮的内容会自动收集，页内点「生成」整理成图'],
         ['ask', 'ask', '快速提问：带上选中内容向 AI 提问'],
       ]) {
         const btn = document.createElement('button');
@@ -486,6 +535,25 @@
     }
     if (act === 'ask') {
       send({ type: 'om:widget-action', kind: 'ask', selection: st.text.slice(0, MAX_TEXT), from: 'sel-popup' }, onActionRes);
+      return;
+    }
+    if (act === 'mindmap') {
+      // 查看本页思维导图：素材来自已收集的高亮（点高亮即入册），这里只开查看页；
+      // 任务参数经 session 暂存转发（URL 不适合带内容）。顺带带回页面正文快照，
+      // 供查看页生成时作 LLM 上下文（innerText 已排除脚本/样式，压掉连续空行再截断）。
+      // 快照期间先隐藏自己的浮层（收集提示 toast、工具条宿主等），否则提示文案会混进正文
+      const own = [...document.querySelectorAll(
+        `#om-widget-host, #om-card-host, #om-tx-runner-host, #om-sel-host, #${PANEL_ID}, #${CBTN_ID}, #${HBTN_ID}, #om-mm-collect-toast`,
+      )];
+      const prevDisplay = own.map((n) => n.style.display);
+      own.forEach((n) => { n.style.display = 'none'; });
+      let pageText = '';
+      try {
+        pageText = (document.body?.innerText || '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12000);
+      } finally {
+        own.forEach((n, i) => { n.style.display = prevDisplay[i]; });
+      }
+      send({ type: 'om:widget-action', kind: 'mindmap', from: 'sel-popup', pageText }, onActionRes);
       return;
     }
     // 翻译 / 总结 / 解释代码：就地面板（直调 LLM），不开聊天卡
@@ -812,7 +880,11 @@
       const s = hlBtnSpan;
       hideHlBtn();
       hlSelfRemoved = true; // 自己删的不算外部移除（diagnoseHl 用）
-      if (s?.isConnected) unwrapSpan(s);
+      if (s?.isConnected) {
+        const t = s.textContent;
+        unwrapSpan(s);
+        if (t.trim()) collectMindmap('remove', [t]);
+      }
     });
     pill.appendChild(delBtn);
     // 同工具条：拦 mousedown 保选区/焦点；取消 pointerdown 会吞掉真实 click

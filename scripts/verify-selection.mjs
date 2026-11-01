@@ -1,7 +1,7 @@
 // 一次性 e2e：划词悬浮工具条 + 就地面板 + 代码块胶囊 + 网页上下文全链路。
 // 本地起假 OpenAI SSE 服务 + 测试页（普通段落 + 代码块），程序化选中文本后经
 // 合成 mouseup 跨 world 触发，断言：
-// 普通文本 4 钮（高亮/翻译/总结/提问）、高亮加包与取消（克隆 Range 路径）、
+// 普通文本 5 钮（高亮/翻译/总结/思维导图/提问）、高亮加包与取消（克隆 Range 路径）、
 // 选区收起自动隐藏、代码块单钮「解释代码」、
 // 翻译就地面板直调 LLM（不开聊天卡，prompt 带原文，流式渲染）、
 // 面板追问转聊天卡（预填原文+结果+问题）、提问预填引用格式、
@@ -180,9 +180,9 @@ try {
 
   if (!await evalInPage(sess, `Boolean(document.getElementById('om-widget-host'))`)) throw new Error('浮窗未注入');
 
-  // 1) 普通文本：4 钮，位置在选区下方
+  // 1) 普通文本：5 钮，位置在选区下方
   let st = JSON.parse(await evalInPage(sess, selectJs('txt', 4, 25)));
-  check('普通文本弹 4 钮（高亮/翻译/总结/提问）', st.host && st.acts.join(',') === 'highlight,translate,summary,ask', JSON.stringify(st.acts));
+  check('普通文本弹 5 钮（高亮/翻译/总结/思维导图/提问）', st.host && st.acts.join(',') === 'highlight,translate,summary,mindmap,ask', JSON.stringify(st.acts));
   const rectBelow = await evalInPage(sess, `(() => {
     const host = document.getElementById('om-sel-host');
     const rect = getSelection().getRangeAt(0).getBoundingClientRect();
@@ -214,12 +214,12 @@ try {
   st = JSON.parse(await evalInPage(sess, selectJs('code', 0, 20)));
   check('代码块弹单钮解释代码', st.host && st.acts.join(',') === 'explain-code', JSON.stringify(st.acts));
 
-  // 4b) 行内 <code> 段落（紧邻代码块上方）：行内代码是普通正文，仍 4 钮
+  // 4b) 行内 <code> 段落（紧邻代码块上方）：行内代码是普通正文，仍 5 钮
   st = JSON.parse(await evalInPage(sess, selectJs('mix', 0, 7)));
-  check('含行内代码的段落仍弹 4 钮', st.host && st.acts.join(',') === 'highlight,translate,summary,ask', JSON.stringify(st.acts));
-  // 4c) 选区整个落在行内 <code> 内：无 <pre> 祖先，仍 4 钮
+  check('含行内代码的段落仍弹 5 钮', st.host && st.acts.join(',') === 'highlight,translate,summary,mindmap,ask', JSON.stringify(st.acts));
+  // 4c) 选区整个落在行内 <code> 内：无 <pre> 祖先，仍 5 钮
   st = JSON.parse(await evalInPage(sess, selectJs('mix', 0, 10, 'code')));
-  check('行内代码内起选仍 4 钮', st.host && st.acts.join(',') === 'highlight,translate,summary,ask', JSON.stringify(st.acts));
+  check('行内代码内起选仍 5 钮', st.host && st.acts.join(',') === 'highlight,translate,summary,mindmap,ask', JSON.stringify(st.acts));
 
   // 5) 翻译：就地面板直调 LLM，不开聊天卡
   seen.length = 0;
