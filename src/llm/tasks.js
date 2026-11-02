@@ -21,6 +21,41 @@ export function buildSummaryPrompt({ title, url, text }) {
   ].join('\n');
 }
 
+// ---- 连续阅读（连读：跟随「下一页」链接逐页读一组文档） ----
+
+export const SERIES_PAGE_CHARS = 12000;
+
+// 逐页总结：每页一次独立调用（map-reduce 的 map），无状态、互不依赖
+export function buildSeriesPagePrompt({ index, title, url, text }) {
+  const clipped = (text || '').slice(0, SERIES_PAGE_CHARS);
+  return [
+    `你正在连续阅读一组系列文档（教程 / 手册的连续页面），下面是第 ${index} 页。请用中文总结这一页：`,
+    `1. 先一句话说明这页讲什么；`,
+    `2. 再用要点列表（3~6 条）提炼关键概念、参数、步骤或结论；`,
+    `3. 保留重要的术语、代码标识符与命令原文；正文里没有的内容不要编造。`,
+    ``,
+    `本页标题：${title || '（无标题）'}`,
+    `本页地址：${url || '（未知）'}`,
+    ``,
+    `本页正文（可能截断）：`,
+    clipped || '（这一页没有提取到正文）',
+  ].join('\n');
+}
+
+// 收尾总览（reduce）：逐页摘要拼成一篇整体笔记
+export function buildSeriesDigestPrompt({ start, pages }) {
+  const items = (pages || []).map((p) => `【第 ${p.index} 页】${p.title || '（无标题）'}（${p.url || ''}）\n${p.summary || '（这一页没有总结）'}`).join('\n\n');
+  return [
+    `你刚连续读完一组文档（从 ${start || '起始页'} 开始，共 ${(pages || []).length} 页），以下是逐页摘要。请输出一篇整体笔记，用中文：`,
+    `1. 先用 3~5 句话概括这组文档的整体主题与脉络；`,
+    `2. 再按顺序给出每页要点（每页一行，格式「第 n 页 · 标题：要点」）；`,
+    `3. 最后给出跨页的关键结论、易混淆点或建议的阅读 / 实践顺序（如有）。`,
+    ``,
+    `逐页摘要：`,
+    items,
+  ].join('\n');
+}
+
 // ---- 划词思维导图 ----
 
 export const MINDMAP_MAX_CHARS = 12000;
@@ -203,6 +238,12 @@ if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWit
   };
   const P = buildSummaryPrompt({ title: 'T', url: 'https://x', text: 'hello' });
   assert('总结 prompt 含标题与正文', P.includes('T') && P.includes('hello') && P.includes('要点'));
+
+  const SP = buildSeriesPagePrompt({ index: 3, title: 'DataStream API', url: 'https://x/p3', text: 'PAGE3-内容'.repeat(50) });
+  assert('连读逐页 prompt：序号/标题/地址/正文与约束', SP.includes('第 3 页') && SP.includes('DataStream API') && SP.includes('https://x/p3') && SP.includes('PAGE3-内容') && SP.includes('不要编造'));
+  assert('连读逐页 prompt：空正文降级说明', buildSeriesPagePrompt({ index: 1, title: 'T', url: 'u', text: '' }).includes('（这一页没有提取到正文）'));
+  const SD = buildSeriesDigestPrompt({ start: 'https://x/p1', pages: [{ index: 1, title: '起步', url: 'https://x/p1', summary: '第一页要点' }, { index: 2, title: '进阶', url: 'https://x/p2', summary: '' }] });
+  assert('连读总览 prompt：起始/页数/逐页摘要/格式', SD.includes('https://x/p1') && SD.includes('共 2 页') && SD.includes('【第 1 页】起步') && SD.includes('第一页要点') && SD.includes('（这一页没有总结）') && SD.includes('每页一行'));
 
   const MP = buildMindmapPrompt({ title: '导图主题', text: '网页正文', highlights: '【片段1】\n高亮A' });
   assert('导图 prompt 含标题/上下文/片段与格式要求', MP.includes('导图主题') && MP.includes('网页正文') && MP.includes('高亮A') && MP.includes('【高亮片段】') && MP.includes('无序列表'));

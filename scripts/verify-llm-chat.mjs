@@ -1,7 +1,8 @@
 // e2e：LLM 直连聊天 + LLM 任务模式（浏览器工具循环），全程走本地 mock LLM（不产生真实调用）。
 // 覆盖：顶栏引擎切换与记忆、同名模型按供应商精确路由、刷新后会话引擎/模型恢复、
 // OpenAI 与 Anthropic 两种协议的工具调用、读当前网页、下载文件审批（允许 → 文件真实落盘）、
-// 联网读取审批（拒绝不发请求 / 勾选不再询问后自动放行）、流式中停止、停止的工具轮轨迹
+// 联网读取审批（拒绝不发请求 / 勾选不再询问后自动放行；页面带内联事件处理器时解析不刷 CSP 违例）、
+// 流式中停止、停止的工具轮轨迹
 // 完整性（残缺轨迹会被服务端 400 拒掉，拼装时修复）、网页总结气泡折叠正文（全文仍发模型）、
 // 页面无未捕获异常。
 // 用法：node scripts/verify-llm-chat.mjs
@@ -27,7 +28,9 @@ const web = createServer((req, res) => {
   } else if (req.url === '/ext') {
     extHits++;
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(`<html><head><title>外链</title><script>var x=1</script></head><body><main><p>外链正文 ${EXT_MARKER}</p></main></body></html>`);
+    // 页面带内联事件处理器（on*=）：fetch_url 用 DOMParser 解析时若不先剥掉，
+    // 解析出的文档继承扩展页 CSP（script-src 'self'），控制台会刷 CSP 违例噪音
+    res.end(`<html><head><title>外链</title><script>var x=1</script></head><body onload="boot()" onmouseover=track()><main onclick="go()"><p>外链正文 ${EXT_MARKER}</p></main></body></html>`);
   } else { res.writeHead(404); res.end(); }
 });
 await new Promise((r) => web.listen(0, '127.0.0.1', r));
@@ -67,6 +70,7 @@ const mock = await startMockLlm({
 const downloadDir = mkdtempSync(join(tmpdir(), 'vela-dl-'));
 const browser = await launch({ port: 9361, url: `${WEB}/page` });
 const exceptions = [];
+const securityIssues = []; // CSP 违例等安全类控制台条目（Log 域，Runtime.consoleAPICalled 收不到）
 try {
   const sw = await browser.sw();
   await seedStorage(sw, {
@@ -86,8 +90,10 @@ try {
 
   const openChat = async () => {
     const s = await browser.openTab(`chrome-extension://${browser.extId}/src/chatpage/chat.html`, { wait: 1800 });
+    await s.send('Log.enable');
     s.on((m) => {
       if (m.method === 'Runtime.exceptionThrown') exceptions.push(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text);
+      if (m.method === 'Log.entryAdded' && m.params.entry?.source === 'security') securityIssues.push(m.params.entry.text);
     });
     await s.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir, eventsEnabled: false });
     await waitFor(() => s.evaluate(`!!document.getElementById('om-engine')`));
@@ -373,6 +379,7 @@ try {
   }
 
 
+  check('联网读取解析 HTML 不刷 CSP 违例（内联事件处理器在字符串层剥掉）', !securityIssues.some((t) => /Content Security Policy/i.test(t)), securityIssues);
   check('聊天页无未捕获异常', exceptions.length === 0, exceptions);
   chat.close();
 } catch (e) {

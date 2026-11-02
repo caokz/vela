@@ -101,6 +101,7 @@ export async function locate(roots, path, { kind = 'any', create = false } = {})
 function notFound(e, root, segs) {
   if (e?.name === 'NotAllowedError') return new Error('没有该文件夹的访问授权：请在发送消息时允许访问，或在知识库里重新添加');
   if (e?.name === 'TypeMismatchError') return new Error(`${[root.name, ...segs].join('/')} 的类型不对（文件 / 目录混淆）`);
+  if (e?.name === 'ReadOnlyError') return e; // 快照等只读根：原样抛出，错误信息里已写明原因与出路
   return new Error(`找不到 ${[root.name, ...segs].join('/')}`);
 }
 

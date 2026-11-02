@@ -3,9 +3,12 @@
 // FileSystemDirectoryHandle，可存 IndexedDB、可读写；把文件选择框打桩成返回 OPFS 句柄，走真实按钮流程。
 // 覆盖：知识库弹层「授权文件夹 / 授权文件」、句柄持久化（刷新后仍可用）、list / search / read（java、
 // docx、xlsx、pptx、PDF 附件）、说明型 skill（系统提示列出 + load_skill）、edit_file 审批卡 diff →
-// 允许后真实落盘、write_file 拒绝后不落盘、LLM 问答模式附带单个文件内容。
+// 允许后真实落盘、write_file 拒绝后不落盘、LLM 问答模式附带单个文件内容；
+// 宿主页 iframe 聊天卡：File System Access 选择框弹不出 →「授权文件」降级只读快照
+// （任务模式读、write 明确报只读错、问答附带、重载后 IndexedDB 副本仍可读）。
 // 用法：node scripts/verify-kb-tools.mjs
-import { launch, sleep, waitFor, createChecker, seedStorage } from './lib/cdp.mjs';
+import { launch, sleep, waitFor, connect, createChecker, seedStorage } from './lib/cdp.mjs';
+import { createServer } from 'node:http';
 import { startMockLlm } from './lib/mock-llm.mjs';
 import { sampleDocx, sampleXlsx, samplePptx } from './lib/test-zip.mjs';
 
@@ -64,6 +67,15 @@ const mock = await startMockLlm({
     if (/再读说明/.test(u)) {
       if (!got.length) return call('read_file', { path: 'demo-proj/README.md' });
       return { text: `README：${got[0].content}` };
+    }
+    // 聊天卡快照（单文件根，知识库名即文件名）
+    if (/读快照/.test(u)) {
+      if (!got.length) return call('read_file', { path: 'snap-note.md' });
+      return { text: `快照内容：${String(got[0].content).replace(/\n/g, ' ⏎ ')}` };
+    }
+    if (/改快照/.test(u)) {
+      if (!got.length) return call('write_file', { path: 'snap-note.md', content: '覆盖内容' });
+      return { text: `改结果：${String(got[0].content).replace(/\n/g, ' ')}` };
     }
     return { text: `问答回答（system=${req.messages.filter((m) => m.role === 'system').map((m) => m.text).join('§').replace(/\n/g, ' ')}）` };
   },
@@ -210,6 +222,91 @@ try {
   await send('总结一下');
   const qa = await waitAnswer(/问答回答/, 1);
   check('问答模式把文件内容附进 system 且不带工具', /README-MARKER/.test(qa) && mock.requests[n1]?.tools.length === 0, qa.slice(0, 200));
+
+  // ---- 7. 聊天卡（宿主页 iframe）：File System Access 弹不出，「授权文件」降级只读快照 ----
+  const web = createServer((q, r) => {
+    r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    r.end('<!doctype html><meta charset="utf-8"><title>宿主页</title><body style="margin:0"><iframe id="card" style="width:430px;height:820px;border:0"></iframe></body>');
+  });
+  await new Promise((res) => web.listen(0, '127.0.0.1', res));
+  const host = await b.openTab(`http://127.0.0.1:${web.address().port}/`, { wait: 900 });
+  const openCard = async (convId) => {
+    const url = `chrome-extension://${b.extId}/src/sidepanel/sidepanel.html${convId ? `?conv=${encodeURIComponent(convId)}` : ''}`;
+    await host.evaluate(`document.getElementById('card').src = ${JSON.stringify(url)}; 1`);
+    // 同一 frame 换 src 导航后 target id 不变，按 URL 里的 conv id 区分（URL 会把 conv: 编码成 conv%3A）
+    const key = encodeURIComponent(convId || '');
+    const t = await waitFor(async () => (await b.targets()).find((x) => x.type === 'iframe' && x.url.includes('/src/sidepanel/sidepanel.html') && (!convId || x.url.includes(key) || x.url.includes(convId))), { timeout: 12000, interval: 300 });
+    if (!t) {
+      const frames = (await b.targets()).filter((x) => x.type === 'iframe').map((x) => x.url);
+      throw new Error(`未找到聊天卡 iframe target：${url}；现有 iframe：${frames.join(' | ') || '（无）'}`);
+    }
+    const c = await connect(t.webSocketDebuggerUrl);
+    await c.send('Runtime.enable');
+    c.on((m) => { if (m.method === 'Runtime.exceptionThrown') exceptions.push(`[card] ${m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text}`); });
+    await waitFor(() => c.evaluate(`!!document.getElementById('om-kb')`), { timeout: 10000 });
+    return c;
+  };
+  let card = await openCard('');
+  await card.evaluate(`document.getElementById('om-new').click()`); // 卡片里开一个干净的新对话
+  await sleep(500);
+  // 打桩 <input type="file"> 的 click：真实点击会弹本机文件框卡住流程；只拦 input，按钮不受影响
+  await card.evaluate(`(() => { const o = HTMLInputElement.prototype.click; HTMLInputElement.prototype.click = function () { return this.type === 'file' ? 0 : o.call(this); }; return 1; })()`);
+  const cardConvId = () => card.evaluate(`document.querySelector('.om-conv-item.om-active')?.dataset.convId || ''`);
+  const cardGrantFile = async () => {
+    await card.evaluate(`(() => { const p = document.querySelector('.om-kb-pop'); if (p.hidden) document.getElementById('om-kb').click(); return 1; })()`);
+    await waitFor(() => card.evaluate(`!!document.querySelector('[data-kb-act="grant-file"]')`));
+    await card.evaluate(`document.querySelector('[data-kb-act="grant-file"]').click()`);
+    await waitFor(() => card.evaluate(`!!document.querySelector('input[type="file"][data-om-snapshot="file"]')`), { timeout: 8000 });
+    await card.evaluate(`(() => {
+      const input = document.querySelector('input[type="file"][data-om-snapshot="file"]');
+      const dt = new DataTransfer();
+      dt.items.add(new File(['快照第一行\\nSNAP-FILE-MARKER 第二行'], 'snap-note.md', { type: 'text/plain' }));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change'));
+      return 1;
+    })()`);
+    await sleep(600);
+  };
+  // 上一节把默认引擎切成了问答：空会话原地切回任务模式（知识库不变）
+  await card.evaluate(`(() => { const s = document.getElementById('om-engine'); s.value = 'llm-tools'; s.dispatchEvent(new Event('change')); return 1; })()`);
+  await sleep(400);
+  await cardGrantFile();
+  const snapA = await cardConvId();
+  const snapEntry = (await store()).find((c) => c.id === snapA)?.knowledge?.find((k) => k.kind === 'snapshot');
+  check('聊天卡「授权文件」降级写入只读快照（kind=snapshot）', snapEntry?.name === 'snap-note.md' && snapEntry.handleKind === 'file' && snapEntry.wsPath === 'knowledge/snap-note.md' && !snapEntry.count, snapEntry);
+  check('知识库弹层显示「快照」标签', (await card.evaluate(`[...document.querySelectorAll('.om-kb-item .om-kb-tag')].map((x) => x.textContent).join(',')`)).includes('快照'));
+  const cardSend = (t) => card.evaluate(`(() => { const i = document.getElementById('om-input'); i.value = ${JSON.stringify(t)}; document.getElementById('om-send').click(); return 1; })()`);
+  const snapAnswers = async (id) => { const c = (await store()).find((x) => x.id === id); return (c?.items || []).filter((i) => i.type === 'answer'); };
+  const snapLast = async (id) => { const a = (await snapAnswers(id)).at(-1); return a ? (a.content || '') + (a.error ? `【错误】${a.error}` : '') : ''; };
+  const waitSnap = async (id, re, n) => (await waitFor(async () => (await snapAnswers(id)).length >= n && re.test(await snapLast(id)) && await card.evaluate(`!document.getElementById('om-send').classList.contains('om-streaming')`), { timeout: 25000 })) ? await snapLast(id) : `（超时）${await snapLast(id)}`;
+  await cardSend('读快照');
+  const sr = await waitSnap(snapA, /快照内容：/, 1);
+  check('任务模式读快照（read_file 走虚拟句柄）', /SNAP-FILE-MARKER/.test(sr), sr.slice(0, 200));
+  await cardSend('改快照');
+  await waitFor(() => card.evaluate(`!!document.querySelector('.om-llm-perm .om-diff .is-add')`), { timeout: 10000 });
+  await card.evaluate(`document.querySelector('.om-llm-perm .om-perm-allow').click()`);
+  const sw2 = await waitSnap(snapA, /改结果：/, 2);
+  check('快照只读：write_file 审批后明确报错、原内容不变', /只读/.test(sw2) && !/覆盖内容/.test(sw2), sw2.slice(0, 250));
+  // 有消息的会话切引擎会新建对话（不带原知识库）：新对话里再降级添加一次快照，走问答附带
+  await card.evaluate(`(() => { const s = document.getElementById('om-engine'); s.value = 'llm'; s.dispatchEvent(new Event('change')); return 1; })()`);
+  await sleep(500);
+  await cardGrantFile();
+  const snapB = await cardConvId();
+  const snapBEntry = (await store()).find((c) => c.id === snapB)?.knowledge?.find((k) => k.kind === 'snapshot');
+  const n2 = mock.requests.length;
+  await cardSend('总结一下');
+  const qa2 = await waitSnap(snapB, /问答回答/, 1);
+  check('切问答引擎新建对话后快照可再添加，且附进 system 不带工具', !!snapBEntry && snapB !== snapA && /SNAP-FILE-MARKER/.test(qa2) && mock.requests[n2]?.tools.length === 0, qa2.slice(0, 250));
+  // 重载宿主页：卡片按 ?conv= 恢复会话，IndexedDB 里的快照副本仍可读（问答再答一次）
+  card.close();
+  card = await openCard(snapB);
+  const n3 = mock.requests.length;
+  await cardSend('再总结一遍');
+  const qa3 = await waitSnap(snapB, /问答回答/, 2);
+  check('重载后快照仍可读（IndexedDB 副本持久）', /SNAP-FILE-MARKER/.test(qa3) && mock.requests[n3]?.tools.length === 0, qa3.slice(0, 250));
+  card.close();
+  host.close();
+  web.close();
 
   check('页面无未捕获异常', exceptions.length === 0, exceptions);
 } catch (e) {

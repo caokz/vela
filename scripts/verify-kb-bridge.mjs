@@ -1,7 +1,8 @@
 // e2e：LLM 任务在页内聊天卡里通过 bridge 读写知识库里的本机路径（真实 bridge + 本地 mock LLM）。
 // 复现用户场景：聊天卡里浏览器弹不了文件选择框，Agent 模式能用的「粘贴路径 / 浏览本机」在 LLM 模式下也要能用。
-// 覆盖：卡片里不出现必然报错的「授权文件夹 / 文件」按钮；LLM 引擎的知识库弹层有
-// 「浏览本机…」与路径输入、没有「上传」；「浏览本机…」（跳转 → 勾选 → 添加所选）与粘贴路径两种添加方式；list / search / read（java、docx 二进制、隐藏的
+// 覆盖：卡片里「授权文件夹 / 文件」以只读快照降级保留（快照流程由 verify-kb-tools.mjs 覆盖，
+// 这里只确认按钮在且无「上传」）；LLM 引擎的知识库弹层有「浏览本机…」与路径输入；「浏览本机…」
+// （跳转 → 勾选 → 添加所选）与粘贴路径两种添加方式；list / search / read（java、docx 二进制、隐藏的
 // .vela skill）/ edit_file 审批 diff → 真实写盘；Agent 同步不会把 bridge 路径再拷一份。
 // 需要 bridge 在 127.0.0.1:39217（test-all 自动拉起）。用法：node scripts/verify-kb-bridge.mjs
 import { createServer } from 'node:http';
@@ -84,10 +85,10 @@ try {
   await E(`document.getElementById('om-kb').click()`);
   await waitFor(() => E(`!!document.querySelector('.om-kb-actions input')`));
   const btns = JSON.parse(await E(`JSON.stringify([...document.querySelectorAll('.om-kb-actions button')].map((x) => x.textContent))`));
-  check('卡片里没有必然报错的「授权文件夹 / 文件」按钮，也没有「上传」，只留「浏览本机…」', JSON.stringify(btns) === JSON.stringify(['浏览本机…']) && !!(await rect('.om-kb-actions input')), btns);
+  check('卡片里「授权文件夹 / 文件」以只读快照降级保留，无「上传」，LLM 引擎可用「浏览本机…」与路径输入', JSON.stringify(btns) === JSON.stringify(['授权文件夹', '授权文件', '浏览本机…']) && !!(await rect('.om-kb-actions input')), btns);
 
   // ---- 2a. 「浏览本机…」：跳转到目录 → 勾选 → 添加所选（经 bridge fs.list） ----
-  const b1 = await rect('.om-kb-actions button');
+  const b1 = JSON.parse(await E(`(() => { const e = [...document.querySelectorAll('.om-kb-actions button')].find((b) => b.textContent === '浏览本机…'); const r = e.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); })()`));
   await card.mouse('mouseMoved', b1.x, b1.y); await card.mouse('mousePressed', b1.x, b1.y); await card.mouse('mouseReleased', b1.x, b1.y);
   await waitFor(() => E(`!!document.querySelector('.om-kb-jump')`), { timeout: 8000 });
   check('点「浏览本机…」打开目录浏览器（bridge 已连接）', !!(await E(`!!document.querySelector('.om-kb-browser')`)));

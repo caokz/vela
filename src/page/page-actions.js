@@ -41,6 +41,29 @@ export async function summarizeCurrentTab() {
   };
 }
 
+// ---- 连续阅读（连读）----
+// 第 1 页用活动标签页的实况 DOM（innerText 有布局信息，正文最干净），
+// 后续页由 src/read/series.js 抓 HTML 解析。preferTabId：动作来源标签页（pendingTask 带回）。
+export async function readSeriesFirstPage(preferTabId) {
+  let tab = null;
+  if (Number.isInteger(preferTabId)) {
+    try { tab = await chrome.tabs.get(preferTabId); } catch { /* 来源标签页已关：回落活动标签 */ }
+  }
+  if (!tab || !/^(https?|file):/i.test(tab.url || '') || NON_INJECTABLE.test(tab.url)) tab = await activeTab();
+  const article = await runInjected(tab.id, injected.extractArticle);
+  if (!article || (article.text || '').trim().length < 80) {
+    throw new Error('没能从当前页提取到正文（连读需要从一篇正文较长的文档页开始）');
+  }
+  const links = await runInjected(tab.id, injected.collectAnchors);
+  return {
+    url: article.url || tab.url,
+    title: article.title || tab.title || '',
+    text: article.text,
+    anchors: links?.anchors || [],
+    linkNext: links?.linkNext || '',
+  };
+}
+
 // ---- 网页翻译 ----
 // 视口驱动（Monica 式）：bridge 在页面里发现并观察文本块，进视口才上报 om:tx_need；
 // 这里按需小批量翻译、译完一批回填一批，滚动出现新内容继续译，直到还原/关闭/导航。

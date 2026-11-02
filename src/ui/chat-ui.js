@@ -9,14 +9,16 @@ import {
   newUserItem, newAssistantItem, updateConversation, deleteConversation, makeTitle,
 } from '../storage/conversations.js';
 import { buildShell, showToast, ICONS } from './shell.js';
-import { summarizeCurrentTab, translateCurrentTab, cancelTranslate } from '../page/page-actions.js';
+import { summarizeCurrentTab, translateCurrentTab, cancelTranslate, readSeriesFirstPage } from '../page/page-actions.js';
+import { buildSeriesPagePrompt, buildSeriesDigestPrompt } from '../llm/tasks.js';
+import { SERIES_MAX_PAGES, SERIES_DELAY_MS, normalizeUrl, pickNextLink, fetchSeriesPage } from '../read/series.js';
 import { getAgentClient } from '../agent/client.js';
 import { buildAgentPrompt, buildConversationMarkdown, knowledgeLocalDirs } from '../agent/compose.js';
 import { createTurnState, applyEvent, markRendered, turnStateToMeta, stateFromMeta } from '../agent/render.js';
 import { runToolLoop, repairToolTrail } from '../llm/tool-loop.js';
 import { BROWSER_TOOLS, TOOLS_SYSTEM_PROMPT } from '../llm/browser-tools.js';
 import { createFsTools, discoverSkills, fsSystemPrompt } from '../llm/fs-tools.js';
-import { putHandle, deleteHandle, loadRoots, ensurePermission } from '../kb/store.js';
+import { putHandle, putSnapshot, deleteHandle, loadRoots, ensurePermission } from '../kb/store.js';
 import { readFileHandle } from '../kb/files.js';
 import { syncRootsToWorkspace } from '../kb/sync.js';
 import { loadBridgeRoots } from '../kb/bridge-fs.js';
@@ -1510,10 +1512,10 @@ export async function createChatView() {
     return card;
   }
 
-  // Agent 引擎读不到浏览器授权的句柄（拿不到绝对路径）：发送前增量上传到工作区 wsPath。
+  // Agent 引擎读不到浏览器授权的句柄与快照副本（拿不到绝对路径）：发送前增量上传到工作区 wsPath。
   // 返回本轮真正同步（含增量跳过）的条目 id 集合，prompt 据此标注未同步的条目
   async function syncKbToWorkspace(conv) {
-    const entries = (conv.knowledge ?? []).filter((k) => k.kind === 'handle');
+    const entries = (conv.knowledge ?? []).filter((k) => k.kind === 'handle' || k.kind === 'snapshot');
     if (!entries.length) return new Set();
     const roots = await grantedRoots(conv);
     if (!roots.length) return new Set();
@@ -1963,29 +1965,31 @@ export async function createChatView() {
     const row = document.createElement('div');
     row.className = 'om-kb-item';
     row.dataset.kbId = entry.id;
-    const isDir = entry.kind === 'local' || (entry.kind === 'handle' && entry.handleKind === 'dir');
+    const isDir = entry.kind === 'local' || ((entry.kind === 'handle' || entry.kind === 'snapshot') && entry.handleKind === 'dir');
     row.appendChild(svgIcon(isDir ? 'folder' : 'file', 13));
     const path = document.createElement('span');
     path.className = 'om-kb-path';
-    if (entry.kind === 'handle') {
+    if (entry.kind === 'handle' || entry.kind === 'snapshot') {
       path.textContent = entry.name; // 文件夹靠图标区分：路径格是 RTL 省略，尾斜杠会跑到前面
-      path.title = '本机授权（浏览器直接读取，无需 bridge）：LLM 任务按需读写；Agent 发送前自动同步到工作区';
+      path.title = entry.kind === 'snapshot'
+        ? `只读快照（已复制进扩展存储${entry.count ? `，${entry.count} 个文件` : ''}，无需 bridge）：LLM 任务可列 / 搜 / 读；要修改请到侧边栏 / 聊天页授权`
+        : '本机授权（浏览器直接读取，无需 bridge）：LLM 任务按需读写；Agent 发送前自动同步到工作区';
     } else {
       path.textContent = entry.kind === 'local' ? entry.path : `${entry.relPath}（${entry.name}）`;
       path.title = entry.kind === 'local' ? entry.path : entry.relPath;
     }
     row.appendChild(path);
-    if (entry.kind === 'handle') {
+    if (entry.kind === 'handle' || entry.kind === 'snapshot') {
       const tag = document.createElement('span');
       tag.className = 'om-kb-tag';
-      tag.textContent = '本机授权';
+      tag.textContent = entry.kind === 'snapshot' ? '快照' : '本机授权';
       row.appendChild(tag);
     }
     const del = document.createElement('button');
     del.textContent = '×';
     del.title = '移除';
     del.addEventListener('click', () => {
-      if (entry.kind === 'handle') deleteHandle(entry.id).catch(() => {});
+      if (entry.kind === 'handle' || entry.kind === 'snapshot') deleteHandle(entry.id).catch(() => {});
       saveKnowledge(conv, (conv.knowledge || []).filter((k) => k.id !== entry.id));
     });
     row.appendChild(del);
@@ -2086,12 +2090,16 @@ export async function createChatView() {
       }
     });
     // Agent：全部入口。LLM：浏览器授权 + 走 bridge 的「浏览本机…」/ 路径输入（聊天卡里浏览器弹不了
-    // 文件选择框，这是卡片里添加本机目录的办法）；「上传」是把内容拷进 Agent 工作区，LLM 用不上
-    // 网页里的聊天卡（跨源 iframe）：Chrome 禁止弹文件选择框，「授权文件夹 / 文件」点了只会报错，
-    // 干脆不放出来，卡片里只留能用的 bridge 入口
+    // 文件选择框，这是卡片里零拷贝引用的办法）；「上传」是把内容拷进 Agent 工作区，LLM 用不上。
+    // 网页里的聊天卡（跨源 iframe）：「授权文件夹 / 文件」降级为只读快照（input file 复制进
+    // IndexedDB，无需 bridge）——没装 bridge 的机器上卡片也有完整的本机知识库入口
     const inCard = window.parent !== window;
-    if (agentMode) actions.append(...(inCard ? [] : [grantDir, grantFile]), browse, pickFiles, pickDir, pathInput);
-    else actions.append(...(inCard ? [] : [grantDir, grantFile]), browse, pathInput);
+    if (inCard) {
+      grantDir.title = '选择文件夹做只读快照（聊天卡无法弹授权框；无需 bridge）：LLM 任务可列 / 搜 / 读，Agent 发送前自动同步；要修改文件请到侧边栏 / 聊天页授权';
+      grantFile.title = '选择文件（可多选）做只读快照（聊天卡无法弹授权框；无需 bridge）：LLM 问答 / 任务可用';
+    }
+    if (agentMode) actions.append(grantDir, grantFile, browse, pickFiles, pickDir, pathInput);
+    else actions.append(grantDir, grantFile, browse, pathInput);
     kbPop.appendChild(actions);
     if (!agentMode) {
       const hint = document.createElement('div');
@@ -2100,7 +2108,7 @@ export async function createChatView() {
         ? 'LLM 问答：单个文件会附进上下文；分析文件夹 / 项目请切到「LLM 任务」。'
         : 'LLM 任务：模型可列目录、搜索、读取（代码 / Markdown / Word / Excel / PPT / PDF / 图片），修改文件前会先给你看 diff 确认。';
       hint.textContent += inCard
-        ? ' 在这里用「浏览本机…」或粘贴路径添加（需 bridge 在运行）。'
+        ? ' 聊天卡里「授权文件夹 / 文件」以只读快照添加（复制进扩展存储，无需 bridge、不可写）；持久授权与写入请到侧边栏 / 聊天页。「浏览本机…」/ 粘贴路径需 bridge 在运行。'
         : ' 「授权文件夹 / 文件」用浏览器选择框（无需 bridge）；「浏览本机…」/ 粘贴路径经 bridge 读取。';
       kbPop.appendChild(hint);
     }
@@ -2175,6 +2183,9 @@ export async function createChatView() {
   async function addKbHandle(kind) {
     const conv = conversations.find((c) => c.id === currentId);
     if (!conv) return;
+    // 网页里的聊天卡（跨源 iframe）：Chrome 禁弹 File System Access 选择框、也禁跨源
+    // requestPermission（侧边栏授过的句柄在卡片里读不了）——降级为只读快照，无需 bridge
+    if (window.parent !== window) return addKbSnapshot(kind, conv);
     let handles;
     try {
       if (kind === 'dir') {
@@ -2186,9 +2197,7 @@ export async function createChatView() {
       }
     } catch (e) {
       if (e?.name === 'AbortError') return; // 用户取消
-      showToast(R.toast, window.parent !== window
-        ? '网页里的聊天卡不能弹出系统文件选择框（Chrome 限制）：请改用「浏览本机…」或粘贴路径（经 bridge），或在侧边栏 / 聊天页（Ctrl+Shift+M）里授权'
-        : `无法打开本机文件选择框：${e.message}`, 'error');
+      showToast(R.toast, `无法打开本机文件选择框：${e.message}`, 'error');
       return;
     }
     const used = new Set((conv.knowledge ?? []).map((k) => k.wsPath).filter(Boolean));
@@ -2205,6 +2214,64 @@ export async function createChatView() {
     const hint = currentEngine() === 'llm' && conv.llmMode !== 'tools' && added.some((a) => a.handleKind === 'dir')
       ? '（LLM 问答只附带单个文件，分析文件夹请切到「LLM 任务」）' : '';
     showToast(R.toast, `知识库已添加 ${added.map((a) => a.name).join('、')}${hint}`);
+  }
+
+  // 聊天卡降级添加：<input type="file">（跨源 iframe 里也能弹）选文件 → 只读快照条目
+  // （kind:'snapshot'）。字节复制进扩展 IndexedDB：LLM 问答 / LLM 任务 / Agent 同步都能用，
+  // 不依赖原文件还在、不需要 bridge；不可写。上限与 Agent 同步一致，超了提示去侧边栏按需授权
+  async function addKbSnapshot(kind, conv) {
+    const files = await pickSnapshotFiles(kind);
+    if (!files.length) return; // 用户取消
+    let bytes = 0;
+    for (const f of files) bytes += f.size;
+    if (files.length > 200 || files.some((f) => f.size > 50 * 1024 * 1024) || bytes > 200 * 1024 * 1024) {
+      showToast(R.toast, `快照过大（${files.length} 个文件、${Math.round(bytes / 1048576)} MB；上限 200 个、单个 50 MB、合计 200 MB）：请在侧边栏 / 聊天页「授权文件夹」，按需读取不用拷贝`, 'error');
+      return;
+    }
+    const used = new Set((conv.knowledge ?? []).map((k) => k.wsPath).filter(Boolean));
+    const wsOf = (base) => {
+      let p = `knowledge/${sanitizeName(base)}`;
+      for (let i = 2; used.has(p); i++) p = `knowledge/${sanitizeName(base)}-${i}`;
+      used.add(p);
+      return p;
+    };
+    const added = [];
+    if (kind === 'dir') {
+      // webkitdirectory 的相对路径是「所选文件夹/内部路径」，剥掉首段挂进快照
+      const rels = files.map((f) => String(f.webkitRelativePath || ''));
+      const rootName = rels.find(Boolean)?.split('/')[0] || '快照';
+      const id = crypto.randomUUID();
+      await putSnapshot(id, { files: files.map((f, i) => ({ rel: rels[i] ? rels[i].split('/').slice(1).join('/') : f.name, file: f })) });
+      added.push({ id, kind: 'snapshot', name: rootName, handleKind: 'dir', wsPath: wsOf(rootName), count: files.length });
+    } else {
+      for (const f of files) {
+        const id = crypto.randomUUID();
+        await putSnapshot(id, { files: [{ rel: '', file: f }] });
+        added.push({ id, kind: 'snapshot', name: f.name, handleKind: 'file', wsPath: wsOf(f.name) });
+      }
+    }
+    await saveKnowledge(conv, [...(conv.knowledge ?? []), ...added]);
+    const hint = currentEngine() === 'llm' && conv.llmMode !== 'tools' && added.some((a) => a.handleKind === 'dir')
+      ? '（LLM 问答只附带单个文件，分析文件夹请切到「LLM 任务」）' : '';
+    showToast(R.toast, `已添加快照${kind === 'dir' ? `（${files.length} 个文件）` : ''}：只读副本、无需 bridge${hint}`);
+  }
+
+  // 快照的文件选择：挂进 DOM（隐藏）。真实用户点击弹系统选择框（iframe 内允许）；
+  // 自动化测试可直接对它赋 files 后派发 change
+  function pickSnapshotFiles(kind) {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.dataset.omSnapshot = kind;
+      if (kind === 'dir') input.webkitdirectory = true;
+      input.hidden = true;
+      const done = (files) => { input.remove(); resolve(files); };
+      input.addEventListener('change', () => done([...input.files]), { once: true });
+      input.addEventListener('cancel', () => done([]), { once: true });
+      R.composer.appendChild(input);
+      input.click();
+    });
   }
 
   // 发送前确认本机授权（此时处在点击 / 回车的用户手势内，可弹浏览器授权提示）。
@@ -2227,6 +2294,7 @@ export async function createChatView() {
 
   // 可用的本机知识库根；不弹提示。
   //   浏览器授权的句柄（kind:'handle'）：要有 read 授权；
+  //   只读快照（kind:'snapshot'，聊天卡降级添加）：字节已在 IndexedDB，直接可用、无需授权；
   //   bridge 管的本机路径（kind:'local'，「浏览本机…」/ 路径输入添加）：bridge 在线才能读。
   //     LLM 引擎用 bridge:true 一并带上——聊天卡里浏览器弹不了文件选择框，走 bridge 就没有这个限制；
   //     Agent 同步（syncKbToWorkspace）只要句柄，bridge 路径 Agent 本来就能直接读，别再拷一份
@@ -2843,6 +2911,220 @@ export async function createChatView() {
     });
   }
 
+  // ---- 连续阅读（连读）：从当前文档页开始，自动跟随「下一页」链接逐页读完并汇总 ----
+  // 导航是确定性规则（src/read/series.js 打分挑下一页，同源、去 hash、上限、礼貌间隔），
+  // 不走引擎对话管线：无论当前会话是什么引擎，逐页总结都直接走 streamChat（连读是页面功能，
+  // 与翻译同类）。入口：浮窗「连读」钮 / 右键菜单「连读此文档」→ SW 写 pendingTask。
+  async function readSeries(task = {}) {
+    if (streaming || translating) { showToast(R.toast, '请等待当前任务完成再开始连读', 'error'); return; }
+    if (!ensureModel()) return;
+    showToast(R.toast, '正在读取当前页…', 'info', true);
+    let first;
+    try {
+      first = await readSeriesFirstPage(task.tabId);
+    } catch (e) {
+      showToast(R.toast, e.message, 'error');
+      return;
+    }
+    showToast(R.toast, '');
+    let conv = conversations.find((c) => c.id === currentId);
+    if (!conv) {
+      conv = newConv('连续阅读');
+      conversations.unshift(conv);
+      currentId = conv.id;
+    }
+    if (conv.items.length === 0) conv.title = `连读：${first.title || first.url}`.slice(0, 60);
+    const userItem = newUserItem(conv.id, `请从本页开始连续阅读，自动跟随「下一页」链接读完这组文档并汇总。起始页：${first.url}`, conv.items.at(-1)?.id ?? '');
+    userItem.meta = { kind: 'read-series', url: first.url, title: first.title };
+    conv.items.push(userItem);
+    await saveConversations(conversations);
+    renderConvList();
+    renderMessages();
+    syncEngineUi();
+    await runReadSeriesTurn(conv, userItem, first, selectedLlm());
+  }
+
+  // 可中止的等待：礼貌间隔期间点「停止」立刻结束
+  const sleepAbortable = (ms, signal) => new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('aborted', 'AbortError')); }, { once: true });
+  });
+
+  // 连读轮次：与 runAssistantTurn 同一套持久化纪律（内存权威、写入串行化、500ms 节流、
+  // 结束强制落盘）。正文 = 状态行 + 逐页小结（每页一次无状态 LLM 调用，边读边流式追加）
+  // + 收尾总览（逐页摘要 reduce 成一篇整体笔记）。
+  async function runReadSeriesTurn(conv, userItem, first, sel) {
+    const settings = await loadSettings();
+    const maxPages = Math.min(SERIES_MAX_PAGES, Math.max(1, Number.parseInt(settings.readSeries?.maxPages, 10) || SERIES_MAX_PAGES));
+    conv.llmProviderId = sel.providerId;
+    conv.llmModel = sel.model;
+    const answer = newAssistantItem(conv.id, userItem.id, sel.model);
+    conv.items.push(answer);
+    await saveConversations(conversations);
+    renderMessages();
+    setBusyUi();
+
+    const pages = []; // { index, url, title, summary, error, thin, pending }
+    let stopReason = ''; // no-next / visited / max-pages / error / aborted
+    let errNote = '';
+    let digest = '';
+    let statusLine = '连读准备中…';
+    let localContent = '';
+    let localError = '';
+    let lastPersist = 0;
+    let writeChain = Promise.resolve();
+    const SECTIONS = () => pages.map((p) => {
+      const head = `## ${p.index}. ${p.title || p.url}`;
+      const note = p.thin ? '\n\n> 本页正文提取过短（站点可能需要脚本渲染，建议开标签页阅读原文）。' : '';
+      const err = p.error ? `\n\n> ⚠ 本页总结失败：${p.error}` : '';
+      const body = p.summary || (p.pending ? '（正在总结这一页…）' : '');
+      return `${head}${note}${err}\n\n${body}\n\n原文：${p.url}`;
+    });
+    const assemble = () => {
+      localContent = `> ${statusLine}\n\n${SECTIONS().join('\n\n')}${digest ? `\n\n## 总览\n\n${digest}` : ''}`;
+    };
+    const persist = () => {
+      writeChain = writeChain.then(() => updateConversation(conv.id, (c) => {
+        const it = c.items.find((i) => i.id === answer.id);
+        if (!it) return;
+        it.content = localContent;
+        it.error = localError;
+        if (pages.length) it.meta = { ...(it.meta || {}), readSeries: { pages: pages.map(({ index, url, title }) => ({ index, url, title })), stopReason } };
+      }));
+      return writeChain;
+    };
+    const persistThrottled = () => {
+      const now = Date.now();
+      if (now - lastPersist >= PERSIST_THROTTLE_MS) { lastPersist = now; persist(); }
+    };
+    const persistNow = async (patchStopped = false) => {
+      if (patchStopped) {
+        writeChain = writeChain.then(() => updateConversation(conv.id, (c) => {
+          const it = c.items.find((i) => i.id === answer.id);
+          if (it) it.stopped = true;
+        }));
+      }
+      lastPersist = 0;
+      await persist();
+    };
+
+    const bodyEl = () => R.column.querySelector(`[data-item-id='${answer.id}'] .om-body`);
+    let raf = 0;
+    const flush = () => {
+      raf = 0;
+      const el = bodyEl();
+      if (el) {
+        el.innerHTML = renderMarkdown(localContent);
+        if (scrollPinned) R.messages.scrollTop = R.messages.scrollHeight;
+      }
+    };
+    const scheduleFlush = () => { if (!raf) raf = requestAnimationFrame(flush); };
+
+    const abort = new AbortController();
+    streaming = { abort, flushNow: flush, persistStopped: async () => { abort.abort(); await persistNow(true); } };
+    setStreamingUi(true);
+    const answerWrap = R.column.querySelector(`[data-item-id='${answer.id}']`);
+    answerWrap?.classList.add('om-streaming');
+
+    try {
+      const visited = new Set([normalizeUrl(first.url)].filter(Boolean));
+      let page = first;
+      for (let index = 1; index <= maxPages; index++) {
+        if (abort.signal.aborted) { stopReason = 'aborted'; break; }
+        const pending = { index, url: page.url, title: page.title, summary: '', error: '', thin: (page.text || '').trim().length < 80, pending: true };
+        pages.push(pending);
+        statusLine = `连读进行中：已到第 ${index} 页，正在总结…（点「停止」可随时结束）`;
+        assemble(); scheduleFlush(); persistThrottled();
+        let failed = '';
+        try {
+          await streamChat({
+            messages: [{ role: 'user', content: buildSeriesPagePrompt({ index, title: page.title, url: page.url, text: page.text }) }],
+            model: sel.model, providerId: sel.providerId, signal: abort.signal,
+            overrides: { temperature: 0 },
+            onDelta: (d) => {
+              if (d.error) { failed = d.error.message || '请求失败'; return; }
+              if (d.text) { pending.summary += d.text; assemble(); persistThrottled(); scheduleFlush(); }
+            },
+          });
+        } catch (e) {
+          if (e.name !== 'AbortError') failed = e.message || String(e);
+          else { stopReason = 'aborted'; break; }
+        }
+        pending.pending = false;
+        if (stopReason || abort.signal.aborted) { stopReason = stopReason || 'aborted'; break; }
+        if (failed) pending.error = failed;
+        // 连续两页总结失败：多半是供应商层面的问题（key / 限流 / 断网），不再往后烧调用
+        if (pages.slice(-2).filter((p) => p.error).length >= 2) {
+          stopReason = 'error'; errNote = failed; localError = failed;
+          break;
+        }
+        // 翻页判定在总结之后：先读完这页再决定去不去下一页
+        if (index === maxPages) { stopReason = 'max-pages'; break; }
+        const next = pickNextLink({ anchors: page.anchors, linkNext: page.linkNext, currentUrl: page.url });
+        if (!next) { stopReason = 'no-next'; break; }
+        if (visited.has(next.url)) { stopReason = 'visited'; break; }
+        try { await sleepAbortable(SERIES_DELAY_MS, abort.signal); }
+        catch { stopReason = 'aborted'; break; }
+        statusLine = `连读进行中：已读 ${index} 页，正在抓取第 ${index + 1} 页…（点「停止」可随时结束）`;
+        assemble(); scheduleFlush();
+        try {
+          page = await fetchSeriesPage(next.url, abort.signal);
+        } catch (e) {
+          if (abort.signal.aborted || e.name === 'AbortError') { stopReason = 'aborted'; break; }
+          stopReason = 'error'; errNote = e.message;
+          break;
+        }
+        const nu = normalizeUrl(page.url);
+        if (visited.has(nu)) { stopReason = 'visited'; break; } // 重定向落回已读页
+        visited.add(nu);
+      }
+      if (!stopReason) stopReason = 'no-next';
+      const notes = {
+        'no-next': '后续没有再找到「下一页」链接，这组文档读完了',
+        'visited': '「下一页」指回了已读过的页面，判定这组文档读完',
+        'max-pages': `已到单次连读上限（${maxPages} 页）：可从最后一页再发起连读继续往后读`,
+        'error': `后续页面读取中止：${errNote}`,
+        'aborted': `已手动停止，读到了第 ${pages.length} 页`,
+      };
+      // 收尾总览：至少两页、且不是被手动停掉 / 供应商出错时才做（单页连读就是普通总结）
+      if (pages.length >= 2 && stopReason !== 'aborted' && !localError) {
+        statusLine = `连读完成：共 ${pages.length} 页 — ${notes[stopReason] || ''}`;
+        assemble(); scheduleFlush(); persistThrottled();
+        let digestFailed = '';
+        try {
+          await streamChat({
+            messages: [{ role: 'user', content: buildSeriesDigestPrompt({ start: first.url, pages }) }],
+            model: sel.model, providerId: sel.providerId, signal: abort.signal,
+            overrides: { temperature: 0 },
+            onDelta: (d) => {
+              if (d.error) { digestFailed = d.error.message || '请求失败'; return; }
+              if (d.text) { digest += d.text; assemble(); persistThrottled(); scheduleFlush(); }
+            },
+          });
+        } catch (e) { if (e.name !== 'AbortError') digestFailed = e.message || String(e); }
+        if (digestFailed && !digest) {
+          digest = `> 总览生成失败：${digestFailed}（逐页小结如上）`;
+          assemble();
+        }
+      } else {
+        statusLine = `连读结束：共 ${pages.length} 页 — ${notes[stopReason] || ''}`;
+        assemble();
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') localError = err.message || String(err);
+    }
+    await persistNow();
+    if (raf) cancelAnimationFrame(raf);
+    answerWrap?.classList.remove('om-streaming');
+    flush();
+    streaming = null;
+    setStreamingUi(false);
+    setBusyUi();
+    conversations = await loadConversations();
+    renderConvList();
+    renderMessages();
+  }
+
   // ---- 输入框 ----
   function autoGrow() {
     R.input.style.height = 'auto';
@@ -2880,9 +3162,9 @@ export async function createChatView() {
     try {
       const { pendingTask, pendingPrompt } = await chrome.storage.session.get(['pendingTask', 'pendingPrompt']);
       if (pendingTask) {
-        // 翻译不走聊天引擎，只受 translatePage 内的供应商守卫约束；
+        // 翻译不走聊天引擎，只受 translatePage 内的供应商守卫约束；连读同理（只看 LLM 供应商）。
         // 聊天类任务（快捷动作 / 旧版预填）仍按引擎守卫拦截并保留任务
-        if (pendingTask.kind !== 'translate-page' && !(await ensureEngineAsync())) return;
+        if (pendingTask.kind !== 'translate-page' && pendingTask.kind !== 'read-series' && !(await ensureEngineAsync())) return;
         await chrome.storage.session.remove('pendingTask');
         if (pendingTask.kind === 'quick-action') {
           const meta = pendingTask.sourceUrl
@@ -2908,6 +3190,8 @@ export async function createChatView() {
           translatePage();
         } else if (pendingTask.kind === 'page-summary') {
           summarizePage();
+        } else if (pendingTask.kind === 'read-series') {
+          readSeries(pendingTask);
         }
         return;
       }

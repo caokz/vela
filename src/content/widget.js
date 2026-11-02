@@ -37,6 +37,8 @@
     media: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 15.5l-4.5-4.5-6 6L7 13.5l-4 4"/>',
     // 思维导图：中心节点分三支
     mind: '<circle cx="5" cy="12" r="2.1"/><circle cx="17" cy="6" r="2.1"/><circle cx="17" cy="12" r="2.1"/><circle cx="17" cy="18" r="2.1"/><path d="M7.1 12h2.4M9.5 6v12M9.5 6h5.4M9.5 12h5.4M9.5 18h5.4"/>',
+    // 连续阅读：一叠往后翻的文档页
+    pages: '<rect x="9" y="3" width="11" height="13" rx="1.5"/><path d="M15 20H5.5A1.5 1.5 0 0 1 4 18.5V7"/><path d="M12 7h5M12 11h5"/><path d="M7 11l-1.5 3.5h3L7 18"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   };
 
@@ -797,6 +799,7 @@
         <button class="act" data-act="translate-page" title="翻译此页"></button>
         <button class="act" data-act="quick-action" title="解释选中文字"></button>
         <button class="act" data-act="mindmap" title="本页思维导图：划词高亮素材 / 整页正文生成导图（无需选中文字）"></button>
+        <button class="act" data-act="read-series" title="连续阅读：从本页开始自动跟随「下一页」链接，逐页读完这组文档并汇总"></button>
         <button class="pill" data-act="open-panel" title="展开 / 收起本页聊天卡">
           <span class="logo"></span><span>AI 助手</span>
           <span class="dismiss" role="button" title="隐藏浮窗（刷新页面后恢复）"></span>
@@ -807,6 +810,7 @@
     root.querySelector('[data-act="translate-page"]').appendChild(svg('translate', 17));
     root.querySelector('[data-act="quick-action"]').appendChild(svg('explain', 17));
     root.querySelector('[data-act="mindmap"]').appendChild(svg('mind', 17));
+    root.querySelector('[data-act="read-series"]').appendChild(svg('pages', 17));
     root.querySelector('.pill .logo').appendChild(svg('logo', 16));
     root.querySelector('.dismiss').appendChild(svg('close', 9));
     pillEl = root.querySelector('.pill');

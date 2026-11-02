@@ -4,6 +4,7 @@
 // 只读工具直接执行；有外部副作用或会把数据带出浏览器的（联网读取、开标签页、下载）先弹卡确认。
 
 import * as injected from '../content/injected.js';
+import { parseFetchedHtml } from '../common/html.js';
 
 // 可读取的网页：白名单判定。没有 tabs 权限时扩展页/浏览器内置页的 tab.url 是 null，
 // 黑名单正则对空串不命中，会把独立聊天页自己当成「当前网页」去注入
@@ -76,9 +77,11 @@ async function readTab(tab, maxChars) {
   return `标题：${a.title || '（无标题）'}\n网址：${a.url}\n\n${cut(a.text || '（页面没有可提取的正文）', clampChars(maxChars))}`;
 }
 
-// HTML → 纯文本：DOMParser 无布局，innerText 退化成 textContent，块级元素后手动补换行
+// HTML → 纯文本：DOMParser 无布局，innerText 退化成 textContent，块级元素后手动补换行。
+// 解析统一走 parseFetchedHtml：字符串层先剥内联事件处理器——DOMParser 文档继承扩展页
+// CSP，不剥会往控制台刷「Executing inline event handler violates…」违例噪音（见 common/html.js）
 function htmlToText(html) {
-  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const doc = parseFetchedHtml(html);
   doc.querySelectorAll('script,style,noscript,template,svg,iframe').forEach((n) => n.remove());
   const BLOCK = 'p,div,section,article,li,tr,h1,h2,h3,h4,h5,h6,pre,blockquote,br,dd,dt,table,ul,ol,header,footer,main';
   doc.querySelectorAll(BLOCK).forEach((n) => n.append(doc.createTextNode('\n')));

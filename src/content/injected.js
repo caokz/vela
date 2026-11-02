@@ -41,3 +41,33 @@ export function getSelectionText() {
   }
   return { title: document.title, url: location.href, text: String(window.getSelection() || '') };
 }
+
+// 连续阅读：收集本页链接清单与 <link rel=next> 声明，交 src/read/series.js 的打分挑「下一页」。
+// 归一化逻辑与 series.js normalizeUrl 同款（经典脚本禁 import，就地内联）：去 hash、只收 http(s)、相对地址按本页解析
+export function collectAnchors() {
+  const norm = (raw) => {
+    const s = String(raw ?? '').trim();
+    if (!s) return '';
+    try {
+      const u = new URL(s, location.href);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+      u.hash = '';
+      return u.href;
+    } catch { return ''; }
+  };
+  const linkNext = norm(document.querySelector('link[rel="next" i]')?.getAttribute('href') || '');
+  const anchors = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (anchors.length >= 800) break;
+    const href = norm(a.getAttribute('href') || '');
+    if (!href) continue;
+    anchors.push({
+      href,
+      text: (a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+      rel: (a.getAttribute('rel') || '').toLowerCase().split(/\s+/).filter(Boolean),
+      inNav: !!a.closest('nav,footer,[role="navigation"],[class*="pag"],[class*="next"]'),
+      order: anchors.length,
+    });
+  }
+  return { linkNext, anchors };
+}

@@ -7,6 +7,7 @@ import { DRAFT_KEY, DRAFT_MAX_PAGES, PAGE_CTX_MAX, pageKeyOf, addItem, removeIte
 const MENU_ROOT = 'om-root';
 const MENU_CHAT_TAB = 'om-chat-tab';
 const MENU_TRANSLATE = 'om-translate-page';
+const MENU_READ_SERIES = 'om-read-series';
 const menuActionId = (actionId) => `om-qa:${actionId}`;
 
 async function rebuildMenus() {
@@ -21,6 +22,10 @@ async function rebuildMenus() {
   );
   chrome.contextMenus.create(
     { id: MENU_TRANSLATE, parentId: MENU_ROOT, title: '翻译此网页', contexts: ['page'] },
+    () => void chrome.runtime.lastError,
+  );
+  chrome.contextMenus.create(
+    { id: MENU_READ_SERIES, parentId: MENU_ROOT, title: '连读此文档（跟随下一页）', contexts: ['page'] },
     () => void chrome.runtime.lastError,
   );
   chrome.contextMenus.create(
@@ -175,7 +180,7 @@ async function resolveQuickAction(actionId) {
 // ask 默认「快速提问」预填输入框；面板追问带 autoSend 直接发送。
 async function handleWidgetAction(msg, tab) {
   const ts = Date.now();
-  if (msg.kind === 'page-summary' || msg.kind === 'translate-page') {
+  if (msg.kind === 'page-summary' || msg.kind === 'translate-page' || msg.kind === 'read-series') {
     await chrome.storage.session.set({ pendingTask: { kind: msg.kind, tabId: tab?.id ?? null, ts } });
     return { ok: true };
   }
@@ -281,6 +286,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     await openChatInTab(tab); // 先开聊天界面再写任务，界面加载后经 onChanged 消费
     await chrome.storage.session.set({
       pendingTask: { kind: 'translate-page', tabId: tab?.id ?? null, ts: Date.now() },
+    });
+    return;
+  }
+  if (info.menuItemId === MENU_READ_SERIES) {
+    await openChatInTab(tab);
+    await chrome.storage.session.set({
+      pendingTask: { kind: 'read-series', tabId: tab?.id ?? null, ts: Date.now() },
     });
     return;
   }

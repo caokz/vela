@@ -336,3 +336,50 @@ test('bridge 离线：本机路径条目整体跳过并给出原因', async () =
   assert.match(skipped[0].reason, /bridge 未连接/);
   assert.equal(skipped[0].name, 'proj');
 });
+
+// ---- 快照条目（kind:'snapshot'，聊天卡降级添加的只读副本，kb/snapshot-fs.js 虚拟句柄） ----
+const snapFile = (rel, content, name) => ({ rel, file: new File([content], name || (rel || 'f').split('/').pop(), { type: 'text/plain' }) });
+
+test('快照虚拟句柄：目录树 + 同一套文件工具（读 / 搜 / 列 / skill），单文件根', async () => {
+  const { buildSnapshotRoot } = await import('../src/kb/snapshot-fs.js');
+  const files = [
+    snapFile('src/Main.java', 'class Main { /* SNAP-MARKER */ }\n'),
+    snapFile('README.md', '# 快照\nSNAP-README'),
+    snapFile('.vela/skills/fmt/SKILL.md', '---\nname: fmt\ndescription: 快照规范\n---\n# 规范\nSNAP-SKILL'),
+  ];
+  const root = buildSnapshotRoot('demo-snap', files);
+  assert.equal(root.kind, 'directory');
+  const roots = [{ id: 's1', name: 'demo-snap', handle: root, kind: 'dir' }];
+  const skills = await discoverSkills(roots);
+  assert.deepEqual(skills.map((s) => s.name), ['fmt']);
+  const tools = createFsTools(roots, skills);
+  assert.match((await tool(tools, 'read_file').run({ path: 'demo-snap/src/Main.java' })).text, /1│class Main.*SNAP-MARKER/);
+  assert.match(await tool(tools, 'search_files').run({ query: 'SNAP-README' }, {}), /demo-snap\/README\.md:2:/);
+  assert.match(await tool(tools, 'list_files').run({}), /README\.md（/);
+  assert.match(await tool(tools, 'load_skill').run({ name: 'fmt' }), /SNAP-SKILL/);
+  // 单文件根：rel 为空 → 文件句柄，路径就是条目名
+  const single = buildSnapshotRoot('notes.md', [snapFile('', '单行快照', 'notes.md')]);
+  assert.equal(single.kind, 'file');
+  assert.match((await tool(createFsTools([{ id: 's2', name: 'notes.md', handle: single, kind: 'file' }]), 'read_file').run({ path: 'notes.md' })).text, /1│单行快照/);
+});
+
+test('快照只读：write_file / edit_file 明确报错且原内容不变', async () => {
+  const { buildSnapshotRoot } = await import('../src/kb/snapshot-fs.js');
+  const root = buildSnapshotRoot('demo-snap', [snapFile('a.txt', 'AAA\nBBB\n')]);
+  const tools = createFsTools([{ id: 's1', name: 'demo-snap', handle: root, kind: 'dir' }]);
+  await assert.rejects(tool(tools, 'write_file').run({ path: 'demo-snap/new.md', content: 'x' }), /只读/);
+  await assert.rejects(tool(tools, 'edit_file').run({ path: 'demo-snap/a.txt', old_string: 'AAA', new_string: 'X' }), /只读/);
+  assert.match((await tool(tools, 'read_file').run({ path: 'demo-snap/a.txt' })).text, /AAA/);
+  await assert.rejects(tool(tools, 'read_file').run({ path: 'demo-snap/nope.txt' }), /找不到/);
+});
+
+test('Agent prompt：快照条目与 handle 同样按工作区路径列出', async () => {
+  const { buildAgentPrompt } = await import('../src/agent/compose.js');
+  const conv = { knowledge: [
+    { id: 'a', kind: 'snapshot', name: 'proj', handleKind: 'dir', wsPath: 'knowledge/proj' },
+    { id: 'b', kind: 'snapshot', name: 'x.md', handleKind: 'file', wsPath: 'knowledge/x.md' },
+  ] };
+  const p = buildAgentPrompt(conv, { content: '问' }, { syncedIds: new Set(['b']) });
+  assert.match(p, /- knowledge\/proj\/（proj）（本轮未同步，内容可能过期或缺失）/);
+  assert.match(p, /- knowledge\/x\.md（x\.md）$/m);
+});

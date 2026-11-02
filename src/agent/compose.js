@@ -15,8 +15,8 @@ export function knowledgeLocalDirs(conv) {
 // （opts.workspacePath 来自 session.new/resume 响应，工作区已自动加入 contextDirs）。
 export function buildAgentPrompt(conv, userItem, opts = {}) {
   const kbUploads = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'upload' && k.relPath);
-  // 浏览器授权的本机文件夹 / 文件：发送前已增量同步到工作区 wsPath（kb/sync.js）
-  const kbHandles = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'handle' && k.wsPath);
+  // 浏览器授权的本机文件夹 / 文件与只读快照：发送前已增量同步到工作区 wsPath（kb/sync.js）
+  const kbHandles = (conv?.knowledge ?? []).filter((k) => k && (k.kind === 'handle' || k.kind === 'snapshot') && k.wsPath);
   // bridge 管的本机路径：CLI 侧已进 additionalDirectories 可直接读，但模型不知道它们
   // 存在——不在 prompt 里点名，问起相关内容它会按先验去网上找（GitHub / 搜索）
   const kbLocals = (conv?.knowledge ?? []).filter((k) => k && k.kind === 'local' && k.path);
