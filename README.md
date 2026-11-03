@@ -57,7 +57,7 @@
 | 智谱 / DeepSeek / Kimi 等 | OpenAI 兼容 | 见各官方文档 |
 
 3. 模型栏手动填写，或点「测试连接」自动拉取（`GET /models`）合并
-4. 勾选「默认」→「保存全部」。保存时浏览器会弹一次站点访问授权（必需，否则扩展页 fetch 被 CORS 拦）
+4. 勾选「默认」→「保存全部」
 
 ## 三引擎
 
@@ -80,7 +80,7 @@
 - **bridge 伴生进程**（`bridge/`，Node ≥18）：扩展页 ↔ 本机 agent CLI 的 WebSocket 桥，只绑 `127.0.0.1`，token 首次握手自动配对 + Origin 校验（网页无法接入）
 - **子智能体**：agent 派出的子智能体（Task 工具）内部步骤折叠到对应 Task 步骤下；大范围源码探索建议把项目目录绑定为工作目录（知识库弹层）
 - **权限模式（会话级）**：输入框下方下拉——每步审批 / 自动接受编辑 / 自动放行；设置页配全局默认
-- **模型（会话级）**：输入框下方下拉，选项经 bridge 从 agent 背后的 LLM 网关动态拉取，拉不到回退 Opus / Sonnet / Haiku 别名；默认项显示真实落点
+- **模型（会话级）**：输入框下方下拉，选项经 bridge 从 agent 背后的 LLM 网关动态拉取，拉不到时 Claude 系回退 Opus / Sonnet / Haiku 别名；默认项显示真实落点
 - **会话工作区**：每个对话在「工作基础目录」（默认 `~/.vela-bridge/workspaces`）下自动建独立子目录；也可在知识库弹层把本机项目目录绑定为工作目录（agent 直接在项目里干活）
 - **知识库与附件**：见下节；附件支持文件、图片、音视频（单个与累计 ≤100MB），发送时上传进工作区 `uploads/`
 - agent 侧 session 跨轮续接：断线自动补帧（500 帧缓冲），bridge 重启后仍记得上文
@@ -102,7 +102,7 @@
 
 - **页面浮窗**（主要入口）：http(s) 页面右侧常驻——深色圆形动作钮（总结 / 翻译 / 解释选中文字 / 连读 / 导图）+ 品牌紫胶囊。胶囊就地开关**页内聊天卡**；「×」隐藏当前页浮窗，刷新自动恢复；翻译按钮是开关（就地启动不弹聊天卡，完成带 ✓，再点还原），悬停亮出小设置齿轮（翻译模型 / 目标语言 / 对照 / 沉浸，改动即存）
 - **总结此页**：提取当前标签页正文（标题 + URL 随消息记录），流式总结，可追问
-- **翻译此页**：视口驱动整页翻译——先译当前视口（下方 1 屏预取），滚动自动续译，等待段落就地显示「翻译中」；对照（默认）/ 沉浸可切；自动跳过页眉页脚 / 代码 / 标识符；每页翻译上限可在设置页调整（默认 1500 块 / 300000 字符）
+- **翻译此页**：视口驱动整页翻译——先译当前视口（下方 1 屏预取），滚动自动续译，等待段落就地显示「翻译中」；对照（默认）/ 沉浸可切；自动跳过代码块与表单控件，纯标识符 / 配置项 / URL 不翻译；每页翻译上限可在设置页调整（默认 1500 块 / 300000 字符）
 - **快捷动作**：选中文字 → 工具条或右键动作组，模板可在设置页增删改（`{text}` 占位符）
 - **划词思维导图**：高亮只记录、生成永远显式——「高亮」把选中文本攒进素材库，「思维导图」钮显式生成（高亮素材 / 整页正文双模式，同页同模式内容没变重开零调用）；支持就地改名、编辑大纲往返、折叠 / 平移缩放、导出 .md / FreeMind .mm
 - **媒体理解**：鼠标停在 ≥80px 的图片 / 视频上 200ms，右上角浮出品牌紫圆钮，点击就地弹单媒体弹层。图片四动作：分析 / 提取文案 / 进导图 / 下载；视频取关键帧做视觉分析
@@ -118,7 +118,7 @@ npm install        # 仅首次
 node index.js      # 默认监听 ws://127.0.0.1:39217
 ```
 
-或直接双击 `bridge\start.bat`（自动切目录、首次装依赖、启动）。前提：本机已安装并登录 Claude Code（`claude` 命令可用）或 Codex（`codex` 命令可用）。
+或直接双击 `bridge\start.bat`（自动切目录、首次装依赖、启动）。不想克隆仓库时，从 [GitHub Release](https://github.com/caokz/vela/releases) 下载 `vela-bridge-<版本>.zip` 解压，同样 `npm install` 后 `node index.js`。前提：本机已安装并登录 Claude Code（`claude` 命令可用）或 Codex（`codex` 命令可用）。
 
 **开机自启**（一次配置）：管理员权限不是必须，注册 HKCU Run 键即可：
 
@@ -129,16 +129,6 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v VelaBridge /t RE
 `bridge-hidden.vbs` 隐藏窗口启动，输出写 `bridge\bridge-autostart.log`。取消自启：`reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v VelaBridge /f`。
 
 **设置页启停**：bridge 首次运行后在 Windows 注册 `vela-bridge://` URL 协议；设置页「启动 bridge」按钮经该协议拉起进程，「停止 bridge」走优雅退出，连接状态实时显示。首次启动会在 `~/.vela-bridge/token.json` 生成配对 token（0600 权限），扩展与 bridge 首次握手自动配对，无需手动粘贴。
-
-## 上架 Chrome 商店
-
-host_permissions 保留 `<all_urls>`（页面常驻浮窗、任意网页总结 / 翻译依赖它），与主流 AI 助手类扩展一致，审核时附用途说明即可。步骤：
-
-1. 打包：`node scripts/package.mjs` → `dist/vela-<版本>.zip`（白名单制，只含 `manifest.json` / `src/` / `assets/`；bridge 是本机伴生进程，不进扩展包）。bridge 单独分发：`node scripts/package-bridge.mjs`，挂 GitHub Release，用户下载后 `npm i && node index.js`
-2. 开发者账号一次性 $5 注册费，上传 zip 提审
-3. 隐私政策链接（必填）：`<all_urls>` + 「读取和更改所有网站数据」触发强制要求——数据全部本地存储，网络请求只发用户配置的供应商端点与本地 bridge（127.0.0.1），无遥测无账号体系
-4. 权限用途说明（提审表单逐条写清）：`<all_urls>` 任意网页总结 / 翻译 / 划词动作与常驻浮窗；`scripting` 按需注入提取与回填脚本；`sidePanel` / `contextMenus` / `commands` 侧边栏、右键组、快捷键；`downloads` 会话导出与媒体下载；`web_accessible_resources` 页内聊天卡 iframe 与隐藏翻译 runner 页
-5. 截图 1280×800 起，商店描述与隐私政策口径一致
 
 ## 目录结构
 
@@ -166,6 +156,7 @@ src/sidepanel/ src/chatpage/ src/options/    三个页面文档
 scripts/                      测试（单元 + 浏览器 e2e）、打包、图标生成
 docs/DESIGN.md                扩展架构与协议设计
 docs/agent-bridge.md          bridge WS 协议与事件词汇表
+docs/cws-publishing.md        商店上架维护者笔记（不属于用户文档）
 ```
 
 ## 安全说明
@@ -183,7 +174,7 @@ docs/agent-bridge.md          bridge WS 协议与事件词汇表
 - `max_tokens` 默认不发送；Anthropic 协议必填，默认 4096。部分新模型不接受 temperature，留空即不发送
 - 浮窗发起的翻译跑在页内隐藏 runner iframe，页面导航即结束；右键菜单发起的翻译跑在侧边栏 / 聊天页，关闭面板即终止
 - 原生侧边栏无关闭 API（Chrome 限制）：页内开合由浮窗聊天卡承担
-- 沉浸模式下含链接 / 代码 / 图片的段落自动降级为对照（防丢格式）
+- 沉浸模式按块整块替换为纯译文，行内链接 / 代码等标记在还原或切回对照时按快照恢复；代码块两种模式都不翻译
 - 连读只跟同源「下一页」，不跨站；单次上限 30 页（`llmSettings.readSeries.maxPages`）
 - 聊天卡里的知识库授权是只读快照（浏览器对跨源 iframe 的限制），要零拷贝句柄请在侧边栏 / 聊天页里授权
 - 上下文超限自动对半拆批重试；429 限流中止整轮，可稍后重试

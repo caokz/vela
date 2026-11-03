@@ -20,15 +20,34 @@ mkdirSync(OUT, { recursive: true });
 const require = createRequire(import.meta.url);
 const { WebSocketServer } = require(join(EXT_ROOT, 'bridge', 'node_modules', 'ws'));
 
-// ---- 演示文章（英文技术文，干净排版；段落首词唯一，mock 按它路由翻译） ----
-const PARAS = [
-  ['Streaming pipelines', '流式管道把数据从生产者持续搬运到消费者，理想状态下两边速率一致，数据像水流过管道一样平滑。'],
-  ['Reality rarely cooperates.', '现实很少配合：消费者的处理速度会随负载波动，生产者却往往只顾自己的节奏往前推。'],
-  ['Backpressure is the answer', '背压（backpressure）就是把这种速率差显式管理起来：让快的一端感知慢的一端，而不是把矛盾推给内存。'],
-  ['Two strategies dominate.', '两种策略占主导：响应式拉取让消费者按容量逐批请求数据；有界队列则在缓冲写满时让上游降速。'],
-  ['Bounded buffers matter', '有界缓冲是系统的保底：队列满了就降速或拒绝，远好过无界堆积把进程拖向 OOM。'],
-  ['Water levels tie it together.', '水位线（highWaterMark）把批大小与预取粒度绑在一起：设小吃不满吞吐，设大则延迟上升，需要按场景权衡。'],
+// ---- 演示文章（英文技术文，干净排版）----
+// 翻译 mock 的路由键 = 每个自然段的首句 / 标题全文；译文走 TX_MAP，编号段落请求按协议回等长 JSON 数组
+const P_EN = [
+  'Streaming systems move data from producers to consumers continuously. In the ideal case both sides run at the same rate and records flow through the pipe like water.',
+  'Reality rarely cooperates. Consumer throughput fluctuates with load, downstream latency, and garbage-collection pauses, while producers are often happy to push at their own pace.',
+  'Backpressure is the discipline of managing that rate mismatch explicitly: the fast end should feel the slow end, instead of pushing the conflict into memory.',
+  'Two strategies dominate. Reactive pull has consumers request batches by capacity; bounded queues ask the upstream to slow down once the buffer is full.',
+  'A bounded buffer is the safety net of last resort: refusing or slowing down when the queue is full beats unbounded growth that ends in OOM.',
+  'Water marks tie batch size and prefetch granularity together: too small starves throughput, too large inflates latency — pick per workload.',
 ];
+// 块文本 → 译文（覆盖 h1 / byline / h2 / 全部正文段 / li；pre 代码块按设计跳过不译）
+const TX_MAP = [
+  ['Backpressure in Streaming Systems', '流式系统中的背压'],
+  ['Engineering Notes · Streaming Series · Part 3', '工程笔记 · 流式系列 · 第 3 篇'],
+  ['What backpressure means', '背压是什么'],
+  ['Design choices', '设计取舍'],
+  ['Prefer pull over push when consumers are heterogeneous.', '消费者能力不一时，拉取优于推送。'],
+  ['Keep every buffer bounded — a full queue should apply force, not grow.', '所有缓冲都要有界——队列满了应该施压，而不是变大。'],
+  ['Treat batching and water marks as one dial, not two.', '批大小与水位线要当一个旋钮调，不是两个。'],
+  [P_EN[0], '流式系统持续把数据从生产者搬运到消费者。理想状态下两端速率一致，数据像水流过管道一样平滑。'],
+  [P_EN[1], '现实很少配合：消费者的吞吐随负载、下游延迟与 GC 停顿波动，生产者却往往只顾自己的节奏往前推。'],
+  [P_EN[2], '背压就是把速率差显式管理起来的纪律：让快的一端感知慢的一端，而不是把矛盾推给内存。'],
+  [P_EN[3], '两种策略占主导：响应式拉取让消费者按容量逐批请求数据；有界队列则在缓冲写满时让上游降速。'],
+  [P_EN[4], '有界缓冲是最后的保底：队列满时拒绝或降速，远好过无界堆积最终把进程拖向内存耗尽。'],
+  [P_EN[5], '水位线把批大小与预取粒度绑在一起：设小吃不满吞吐，设大则延迟上升，需要按负载权衡。'],
+];
+// 预期译文块数（h1 + h2×2 + 正文 6 段 + li×3；pre 代码块按设计跳过，byline 是纯 div 不收录）
+const TX_EXPECT_DSTS = 12;
 const article = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Backpressure in Streaming Systems</title>
 <style>
@@ -44,21 +63,21 @@ const article = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 </style></head><body><main>
 <h1>Backpressure in Streaming Systems</h1>
 <div class="byline">Engineering Notes · Streaming Series · Part 3</div>
-<p>${PARAS[0][0]} move data from producers to consumers continuously. In the ideal case both sides run at the same rate and records flow through the pipe like water.</p>
-<p>${PARAS[1][0]} Consumer throughput fluctuates with load, downstream latency, and garbage-collection pauses, while producers are often happy to push at their own pace.</p>
+<p>${P_EN[0]}</p>
+<p>${P_EN[1]}</p>
 <h2>What backpressure means</h2>
-<p>${PARAS[2][0]} Backpressure is about managing that rate mismatch explicitly: the fast end should feel the slow end, instead of pushing the conflict into memory.</p>
-<p>${PARAS[3][0]} Two strategies dominate. Reactive pull has consumers request batches by capacity; bounded queues ask the upstream to slow down once the buffer is full.</p>
+<p>${P_EN[2]}</p>
+<p>${P_EN[3]}</p>
 <h2>Design choices</h2>
 <ul>
   <li>Prefer pull over push when consumers are heterogeneous.</li>
   <li>Keep every buffer bounded — a full queue should apply force, not grow.</li>
   <li>Treat batching and water marks as one dial, not two.</li>
 </ul>
-<p>${PARAS[4][0]} A bounded buffer is the safety net of last resort: refusing or slowing down when the queue is full beats unbounded growth that ends in OOM.</p>
+<p>${P_EN[4]}</p>
 <pre>const source = pull(upstream, { highWaterMark: 16 });
 for await (const batch of source) await sink.write(batch);</pre>
-<p>${PARAS[5][0]} Water marks tie batch size and prefetch granularity together: too small starves throughput, too large inflates latency — pick per workload.</p>
+<p>${P_EN[5]}</p>
 </main></body></html>`;
 
 const web = createServer((req, res) => {
@@ -96,7 +115,15 @@ const mock = await startMockLlm({
     const u = [...req.messages].reverse().find((m) => m.role === 'user' && m.text)?.text || '';
     if (u.includes('思维导图大纲')) return { text: OUTLINE, chunkDelayMs: 8 };
     if (u.includes(QUESTION)) return { text: CHAT_ANSWER, chunkDelayMs: 6 };
-    for (const [en, zh] of PARAS) if (u.includes(en)) return { text: zh, chunkDelayMs: 4 };
+    // 整页翻译：编号段落请求（「n. 原文」），按协议回等长 JSON 字符串数组，命中不了回 null
+    if (u.includes('翻译成')) {
+      const items = [...u.matchAll(/^\d+\. (.+)$/gm)].map((m) => m[1].trim());
+      const out = items.map((t) => {
+        const hit = TX_MAP.find(([k]) => t === k || t.startsWith(k));
+        return hit ? hit[1] : null;
+      });
+      return { text: JSON.stringify(out), chunkDelayMs: 4 };
+    }
     return { text: '（mock 默认回答）' };
   },
 });
@@ -194,12 +221,25 @@ try {
   await sleep(600); // 流式收尾 + 落盘
   await shot(page, 'chat-card.png');
   await page.evaluate(`document.getElementById('om-widget-host').shadowRoot.querySelector('.pill').click()`); // 收起卡片，还页面干净
-  await sleep(400);
+  // 等聊天卡 iframe 真正卸载，防它污染后续截图与等待条件
+  await waitFor(async () => !(await (async () => (await b.targets()).some((x) => x.type === 'iframe' && x.url.includes('/src/sidepanel/sidepanel.html')))()), { timeout: 8000 });
+  await sleep(300);
   card.close();
 
   // ---- 2) 整页翻译：浮窗就地启动，英→中对照 ----
   await page.evaluate(`document.getElementById('om-widget-host').shadowRoot.querySelector('[data-act="translate-page"]').click()`);
-  await waitFor(() => page.evaluate(`(document.body.innerText.match(/流式|背压|水位|有界/g) || []).length >= 6`), { timeout: 25000 });
+  // 完成条件只看页面自身 DOM：译文块数达标且无「翻译中」标记（不受任何 iframe 文本影响）
+  const txDone = await waitFor(() => page.evaluate(`(() => {
+    const dsts = document.querySelectorAll('[data-om-tx-dst]').length;
+    const waiting = document.querySelectorAll('[data-om-tx].om-tx-wait').length;
+    return dsts >= ${TX_EXPECT_DSTS} && waiting === 0 ? dsts : '';
+  })()`), { timeout: 30000 });
+  console.log(`TX dsts=${txDone || '(超时)'}`, await page.evaluate(`(() => ({
+    dsts: document.querySelectorAll('[data-om-tx-dst]').length,
+    waiting: document.querySelectorAll('[data-om-tx].om-tx-wait').length,
+    failed: document.querySelectorAll('[data-om-tx].om-tx-failed').length,
+    blocks: document.querySelectorAll('[data-om-tx]').length,
+  }))()`));
   await sleep(600);
   await shot(page, 'translate.png');
 

@@ -57,7 +57,7 @@ Unlike account-based assistants metered by per-day quotas, Vela leaves both cont
 | Zhipu / DeepSeek / Kimi etc. | OpenAI-compatible | See each provider's docs |
 
 3. Type model IDs manually, or click **Test connection** to fetch and merge them (`GET /models`)
-4. Check **Default** → **Save all**. The browser will ask once for site access permission (required — otherwise fetches from extension pages are blocked by CORS)
+4. Check **Default** → **Save all**
 
 ## Three Engines
 
@@ -80,7 +80,7 @@ The engine is a per-conversation property, switched from the header (your choice
 - **Bridge companion process** (`bridge/`, Node ≥18): a WebSocket bridge between extension pages and local agent CLIs, bound to `127.0.0.1` only; token auto-paired on first handshake + Origin validation (web pages cannot connect)
 - **Sub-agents**: steps of sub-agents spawned by the agent (Task tool) collapse under their Task step; for large codebase exploration, bind the project directory as the workspace (knowledge-base popup)
 - **Permission mode (per conversation)**: dropdown under the input box — approve each step / auto-accept edits / auto-allow; global default configurable in settings
-- **Model (per conversation)**: dropdown under the input box; options are fetched live from the LLM gateway behind the agent via the bridge, falling back to Opus / Sonnet / Haiku aliases; the default entry shows the actual resolved model
+- **Model (per conversation)**: dropdown under the input box; options are fetched live from the LLM gateway behind the agent via the bridge, with Claude falling back to Opus / Sonnet / Haiku aliases when unavailable; the default entry shows the actual resolved model
 - **Conversation workspace**: each conversation gets its own subdirectory under the "workspace base directory" (default `~/.vela-bridge/workspaces`); you can also bind a local project directory as the workspace (the agent works directly inside the project)
 - **Knowledge base & attachments**: see below; attachments support files, images, audio/video (≤100MB each and cumulative), uploaded into the workspace `uploads/` on send
 - Agent-side sessions resume across turns: automatic frame backfill on reconnect (500-frame buffer), context survives bridge restarts
@@ -102,7 +102,7 @@ Format support: text with line numbers (GBK fallback when UTF-8 fails), docx / x
 
 - **Floating widget** (main entry): pinned on the right edge of http(s) pages — dark round action buttons (summarize / translate / explain selection / continuous read / mind map) plus the brand-purple capsule. The capsule toggles the **in-page chat card** in place; "×" hides the widget for the current page (restored on reload); the translate button is a toggle (starts translation in place without opening the chat card, shows ✓ when done, click again to restore); hovering reveals a small settings gear (translation model / target language / bilingual / immersive, saved immediately)
 - **Summarize this page**: extracts the current tab's article (title + URL recorded with the message), streams a summary, follow-ups supported
-- **Translate this page**: viewport-driven full-page translation — translates the current viewport first (1 screen of prefetch below), continues as you scroll, waiting paragraphs show an inline "translating" marker; bilingual (default) / immersive switchable; headers / footers / code / identifiers auto-skipped; per-page limits adjustable in settings (default 1500 blocks / 300000 chars)
+- **Translate this page**: viewport-driven full-page translation — translates the current viewport first (1 screen of prefetch below), continues as you scroll, waiting paragraphs show an inline "translating" marker; bilingual (default) / immersive switchable; code blocks and form controls are skipped automatically, pure identifiers / config tokens / URLs are left untranslated; per-page limits adjustable in settings (default 1500 blocks / 300000 chars)
 - **Quick actions**: select text → toolbar or context-menu group; templates editable in settings (`{text}` placeholder)
 - **Selection mind maps**: highlights only record, generation is always explicit — "Highlight" collects selected text into a material inbox, the "Mind map" button generates explicitly (highlight-material / full-page dual mode; reopening an unchanged page costs zero LLM calls); supports inline rename, outline round-trip editing, collapse / pan / zoom, export to .md / FreeMind .mm
 - **Media understanding**: hover an image / video ≥80px for 200ms and a brand-purple round button appears at its top right; click to open the single-media popup in place. Four actions for images: analyze / extract text / feed into mind map / download; videos get keyframe-based visual analysis
@@ -118,7 +118,7 @@ npm install        # first time only
 node index.js      # listens on ws://127.0.0.1:39217 by default
 ```
 
-Or just double-click `bridge\start.bat` (switches directory, installs dependencies on first run, starts). Prerequisites: Claude Code (`claude` command available) or Codex (`codex` command available), installed and logged in on this machine.
+Or just double-click `bridge\start.bat` (switches directory, installs dependencies on first run, starts). Prefer not to clone the repo? Download `vela-bridge-<version>.zip` from a [GitHub Release](https://github.com/caokz/vela/releases), then run `npm install` and `node index.js` the same way. Prerequisites: Claude Code (`claude` command available) or Codex (`codex` command available), installed and logged in on this machine.
 
 **Autostart on boot** (one-time setup; admin rights not required — an HKCU Run key is enough):
 
@@ -129,16 +129,6 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v VelaBridge /t RE
 `bridge-hidden.vbs` starts the bridge with no console window; output goes to `bridge\bridge-autostart.log`. To remove autostart: `reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v VelaBridge /f`.
 
 **Start/stop from the settings page**: on first run the bridge registers a `vela-bridge://` URL protocol on Windows; the settings page "Start bridge" button launches it via that protocol, "Stop bridge" shuts it down gracefully, with live connection status. The first launch writes a pairing token to `~/.vela-bridge/token.json` (0600); the extension pairs automatically on first handshake — no manual pasting.
-
-## Publishing to the Chrome Web Store
-
-host_permissions keep `<all_urls>` (the pinned widget and summarize/translate on arbitrary pages need it), consistent with mainstream AI assistant extensions; attach a purpose statement during review. Steps:
-
-1. Package: `node scripts/package.mjs` → `dist/vela-<version>.zip` (whitelist-based: only `manifest.json` / `src/` / `assets/`; the bridge is a local companion process and is not part of the extension zip). Distribute the bridge separately: `node scripts/package-bridge.mjs`, attach to a GitHub Release; users run `npm i && node index.js`
-2. One-time $5 developer registration, upload the zip for review
-3. Privacy policy link (mandatory): `<all_urls>` + "Read and change all your data on all websites" triggers the requirement — all data is stored locally; network requests only go to user-configured provider endpoints and the local bridge (127.0.0.1); no telemetry, no accounts
-4. Permission justifications (state each in the review form): `<all_urls>` summarize/translate/selection actions on arbitrary pages + pinned widget; `scripting` on-demand extraction and backfill scripts; `sidePanel` / `contextMenus` / `commands` side panel, context menus, shortcuts; `downloads` conversation export and media downloads; `web_accessible_resources` in-page chat card iframe and the hidden translation runner
-5. Screenshots 1280×800 or larger; keep the store description consistent with the privacy policy
 
 ## Repository Layout
 
@@ -166,6 +156,7 @@ src/sidepanel/ src/chatpage/ src/options/    the three page documents
 scripts/                      tests (unit + browser e2e), packaging, icon generation
 docs/DESIGN.md                extension architecture and protocol design
 docs/agent-bridge.md          bridge WS protocol and event vocabulary
+docs/cws-publishing.md        Chrome Web Store publishing notes (maintainers, Chinese)
 ```
 
 ## Security Notes
@@ -183,7 +174,7 @@ docs/agent-bridge.md          bridge WS protocol and event vocabulary
 - `max_tokens` is not sent by default; required by the Anthropic protocol, default 4096. Some newer models reject temperature — leave it blank to omit
 - Widget-initiated translations run in a hidden in-page runner iframe and end on page navigation; context-menu-initiated translations run in the side panel / chat page and end when it closes
 - The native side panel has no close API (Chrome limitation): in-page open/close is handled by the widget's chat card
-- In immersive mode, paragraphs containing links / code / images fall back to bilingual (to preserve formatting)
+- Immersive mode replaces each block with plain translated text; inline links / code markup are restored from snapshots on revert or when switching back to bilingual; code blocks are never translated in either mode
 - Continuous reading only follows same-origin "next page" links, never crosses sites; 30-page limit per run (`llmSettings.readSeries.maxPages`)
 - Knowledge-base authorization inside the chat card is a read-only snapshot (a browser restriction on cross-origin iframes); for zero-copy handles, authorize from the side panel / chat page
 - Overlong contexts are auto-split in half and retried; 429 rate limits abort the round — retry later
