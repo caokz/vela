@@ -118,7 +118,7 @@ npm install        # 仅首次
 node index.js      # 默认监听 ws://127.0.0.1:39217
 ```
 
-或直接双击 `bridge\start.bat`（自动切目录、首次装依赖、启动）。不想克隆仓库时，从 [GitHub Release](https://github.com/caokz/vela/releases) 下载 `vela-bridge-<版本>.zip` 解压，同样 `npm install` 后 `node index.js`。前提：本机已安装并登录 Claude Code（`claude` 命令可用）或 Codex（`codex` 命令可用）。
+或直接双击 `bridge\start.bat`（自动切目录、首次装依赖、启动）。不想克隆仓库时，从 [GitHub Release](https://github.com/kaizencao/vela/releases) 下载 `vela-bridge-<版本>.zip` 解压，同样 `npm install` 后 `node index.js`。前提：本机已安装并登录 Claude Code（`claude` 命令可用）或 Codex（`codex` 命令可用）。
 
 **开机自启**（一次配置）：管理员权限不是必须，注册 HKCU Run 键即可：
 

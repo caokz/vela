@@ -118,7 +118,7 @@ npm install        # first time only
 node index.js      # listens on ws://127.0.0.1:39217 by default
 ```
 
-Or just double-click `bridge\start.bat` (switches directory, installs dependencies on first run, starts). Prefer not to clone the repo? Download `vela-bridge-<version>.zip` from a [GitHub Release](https://github.com/caokz/vela/releases), then run `npm install` and `node index.js` the same way. Prerequisites: Claude Code (`claude` command available) or Codex (`codex` command available), installed and logged in on this machine.
+Or just double-click `bridge\start.bat` (switches directory, installs dependencies on first run, starts). Prefer not to clone the repo? Download `vela-bridge-<version>.zip` from a [GitHub Release](https://github.com/kaizencao/vela/releases), then run `npm install` and `node index.js` the same way. Prerequisites: Claude Code (`claude` command available) or Codex (`codex` command available), installed and logged in on this machine.
 
 **Autostart on boot** (one-time setup; admin rights not required — an HKCU Run key is enough):
 
