@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findChrome } from './chrome.mjs';
+import { findChrome, killTree } from './chrome.mjs';
 
 export const EXT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -76,7 +76,7 @@ export async function launch({ port, extDir = EXT_ROOT, url = 'about:blank', arg
   const base = `http://127.0.0.1:${port}`;
   const targets = async () => (await fetch(`${base}/json`)).json();
   const swTarget = await waitFor(async () => (await targets()).find((t) => t.type === 'service_worker' && t.url.endsWith('/src/background/service-worker.js')), { timeout: 20000, interval: 500 });
-  if (!swTarget) { chrome.kill(); throw new Error('CDP 未就绪或扩展 SW 未注册'); }
+  if (!swTarget) { await killTree(chrome); throw new Error('CDP 未就绪或扩展 SW 未注册'); }
   const extId = new URL(swTarget.url).host;
   const sw = async () => {
     const t = (await targets()).find((x) => x.type === 'service_worker' && x.url.includes(extId));
@@ -96,9 +96,9 @@ export async function launch({ port, extDir = EXT_ROOT, url = 'about:blank', arg
   };
   const activate = (targetId) => fetch(`${base}/json/activate/${targetId}`);
   const close = async () => {
-    chrome.kill();
+    await killTree(chrome);
     await sleep(800);
-    try { rmSync(profile, { recursive: true, force: true }); } catch { /* Windows 句柄未释放时忽略 */ }
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); } catch { /* Windows 句柄未释放时忽略 */ }
   };
   return { port, extId, base, targets, sw, openTab, activate, close, profile };
 }

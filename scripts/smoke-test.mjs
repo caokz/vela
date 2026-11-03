@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findChrome } from './lib/chrome.mjs';
+import { findChrome, killTree } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CHROME = process.argv[2] || findChrome();
@@ -439,8 +439,8 @@ try {
 } catch (e) {
   check('冒烟流程', false, e.message);
 } finally {
-  chrome.kill();
+  await killTree(chrome);
   await sleep(500);
-  try { rmSync(profile, { recursive: true, force: true }); } catch { /* 目录占用忽略 */ }
+  try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); } catch { /* 目录占用忽略 */ }
 }
 process.exit(failures.length ? 1 : 0);

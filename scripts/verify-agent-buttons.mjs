@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findChrome } from './lib/chrome.mjs';
+import { findChrome, killTree } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const BRIDGE_DIR = join(EXT_ROOT, 'bridge');
@@ -126,9 +126,9 @@ try {
 } catch (err) {
   fail(err.message);
 } finally {
-  chrome.kill();
+  await killTree(chrome);
   await sleep(800);
-  rmSync(profile, { recursive: true, force: true });
+  rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   // 恢复 bridge（隐藏窗口拉起，同 scripts/restart-bridge.mjs）。不能加 detached:true——
   // Windows 下会给 powershell 加 DETACHED_PROCESS，Start-Process 的重定向随之失效，
   // bridge 拉不起来（实测交互运行正常、从 node detached spawn 必失败）。父进程随后

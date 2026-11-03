@@ -1,15 +1,19 @@
-// e2e：agent 模型下拉跟随所选 agent（v0.9.0 修复回归）。
-// 旧版把 models.list 结果缓存成全局单值，且不监听 agent 切换：切到 codex 后
+// e2e：agent 模型下拉跟随所选 agent（v0.9.0 修复回归）+ Agent 引导卡（v1.0.0）。
+// 模型下拉：旧版把 models.list 结果缓存成全局单值，且不监听 agent 切换：切到 codex 后
 // 模型下拉仍是 claude 网关的列表。mock bridge 按 agentId 回不同列表，断言：
 // 切换后下拉重建为新 agent 的模型、默认项文字带新 agent 的探测默认模型、
 // 切回 claude 复原；codex 系网关回空列表时只留「默认模型」（codex 家族无静态别名）。
+// 引导卡：新会话默认引擎是 agent，没装 bridge 的首启用户此前只能靠发送后的 toast
+// 猜原因。断言：有已登录 agent 不显卡；bridge 在但全未登录 → 「还没有已登录的 agent」
+// 形态；bridge 进程消失 → 「Agent 引擎需要本机 bridge」形态；bridge 恢复后经
+// 后台重连（handleAgentStatus ready → refreshAgents）卡片自动消失，无需重载。
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findChrome } from './lib/chrome.mjs';
+import { findChrome, killTree } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CHROME = findChrome();
@@ -21,6 +25,7 @@ const { WebSocketServer } = require(join(EXT_ROOT, 'bridge', 'node_modules', 'ws
 
 // ---- mock bridge：hello / agents.list（三个 agent）/ models.list 按 agentId 分流 ----
 const modelsCalls = []; // models.list 收到的 agentId 序列
+let authedAll = true; // 引导卡场景：置 false 后 agents.list 全部 authed:false
 const AGENTS = [
   { id: 'claude-code', name: 'Claude Code', authed: true, version: 'mock', defaultModel: 'claude-def' },
   { id: 'codex', name: 'Codex CLI', authed: true, version: 'mock', defaultModel: 'codex-def' },
@@ -31,27 +36,32 @@ const MODEL_LISTS = {
   codex: ['codex-m-a', 'codex-m-b'],
   'codex-nomodel': [], // 空列表 → 前端回退 codex 家族别名（无）= 只留默认项
 };
-const wss = new WebSocketServer({ port: BRIDGE_PORT });
-wss.on('connection', (ws) => {
-  ws.on('message', (raw) => {
-    const m = JSON.parse(raw.toString());
-    const reply = (result) => ws.send(JSON.stringify({ id: m.id, ok: true, result }));
-    switch (m.op) {
-      case 'hello':
-        reply({ token: 'mock-token' });
-        break;
-      case 'agents.list':
-        reply({ agents: AGENTS });
-        break;
-      case 'models.list':
-        modelsCalls.push(String(m.params?.agentId || ''));
-        reply({ models: MODEL_LISTS[m.params?.agentId] ?? [] });
-        break;
-      default:
-        reply({});
-    }
+// 同端口可重建：bridge「恢复」场景需要关掉再原样起一个
+const makeBridge = () => {
+  const s = new WebSocketServer({ port: BRIDGE_PORT });
+  s.on('connection', (ws) => {
+    ws.on('message', (raw) => {
+      const m = JSON.parse(raw.toString());
+      const reply = (result) => ws.send(JSON.stringify({ id: m.id, ok: true, result }));
+      switch (m.op) {
+        case 'hello':
+          reply({ token: 'mock-token' });
+          break;
+        case 'agents.list':
+          reply({ agents: AGENTS.map((a) => ({ ...a, authed: authedAll })) });
+          break;
+        case 'models.list':
+          modelsCalls.push(String(m.params?.agentId || ''));
+          reply({ models: MODEL_LISTS[m.params?.agentId] ?? [] });
+          break;
+        default:
+          reply({});
+      }
+    });
   });
-});
+  return s;
+};
+let wss = makeBridge();
 
 const profile = mkdtempSync(join(tmpdir(), 'vela-am-'));
 const chrome = spawn(CHROME, [
@@ -173,14 +183,61 @@ try {
   const emptyOpts = await waitOptions((o) => o.length === 1, '空列表回退');
   check('codex 空列表时只留默认项', emptyOpts && emptyOpts.length === 1 && emptyOpts[0].startsWith('|默认模型（codex-x-def）'), JSON.stringify(emptyOpts));
 
+  // ---- Agent 引导卡 ----
+  const cardText = () => evalIn(chat, `(() => { const c = document.querySelector('.om-empty-card'); return c ? c.textContent : ''; })()`);
+  async function waitCard(pred, label) {
+    for (let i = 0; i < 30; i++) {
+      await sleep(300);
+      const t = await cardText();
+      if (t && pred(t)) return t;
+    }
+    return '';
+  }
+
+  // 6) 有已登录 agent：不显卡
+  check('有已登录 agent 时不显示引导卡', (await cardText()) === '');
+
+  // 7) bridge 在但全未登录 → 「还没有已登录的 agent」形态，两条路都写明
+  authedAll = false;
+  await evalIn(chat, 'location.reload()');
+  await sleep(1500);
+  const cardB = await waitCard((t) => t.includes('还没有已登录的 agent'), '已连无登录');
+  check('bridge 在但无已登录 agent → 引导卡（已连形态）', !!cardB, cardB.slice(0, 60));
+  check('已连形态写明两条路（终端登录 / 切 LLM）', cardB.includes('登录') && cardB.includes('LLM'), cardB.slice(0, 120));
+  check('引导卡带「打开设置」按钮', await evalIn(chat, '!!document.getElementById("om-empty-agent-settings")') === true);
+
+  // 8) bridge 进程消失 → 「Agent 引擎需要本机 bridge」形态，带启动指引
+  // ws 的 close() 只停接新连接、不踢存量连接：页面侧 WS 挂着时回调永不触发，
+  // 必须先 terminate 再 close，另加 2s 兜底防再挂
+  await new Promise((r) => {
+    for (const c of wss.clients) c.terminate();
+    const t = setTimeout(r, 2000);
+    wss.close(() => { clearTimeout(t); r(); });
+  });
+  authedAll = true; // 恢复数据供恢复场景用
+  await evalIn(chat, 'location.reload()');
+  await sleep(1500);
+  const cardA = await waitCard((t) => t.includes('Agent 引擎需要本机 bridge'), '未连形态');
+  check('bridge 未连接 → 引导卡（未连形态）', !!cardA, cardA.slice(0, 60));
+  check('未连形态含启动指引与「不消耗 API Key」', cardA.includes('start.bat') && cardA.includes('不消耗 API Key'), cardA.slice(0, 140));
+
+  // 9) bridge 原端口恢复：后台重连成功 → 卡片自动消失（不重载页面）
+  wss = makeBridge();
+  let cardGone = false;
+  for (let i = 0; i < 50 && !cardGone; i++) {
+    await sleep(500);
+    cardGone = (await cardText()) === '';
+  }
+  check('bridge 恢复后引导卡自动消失（后台重连触发）', cardGone);
+
   chat.close();
 } catch (e) {
   console.error('FAIL 异常', e.message);
   failed = 1;
 } finally {
-  chrome.kill();
+  await killTree(chrome);
   wss.close();
   await sleep(800);
-  rmSync(profile, { recursive: true, force: true });
+  rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   process.exit(failed);
 }

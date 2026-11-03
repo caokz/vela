@@ -160,6 +160,7 @@ export async function createChatView() {
 
   async function refreshAgents(force = false) {
     if (!force && agentsCache.length && Date.now() - agentsCacheAt < AGENTS_CACHE_MS) return agentsCache;
+    const emptyWasVisible = agentEmptyVisible();
     try {
       await agentClient.ensureReady();
       const { agents } = await agentClient.listAgents();
@@ -183,6 +184,7 @@ export async function createChatView() {
       opt.selected = true;
       R.agentSelect.appendChild(opt);
       syncAgentModelOptions(conversations.find((c) => c.id === currentId));
+      rerenderOnAgentEmptyFlip(emptyWasVisible);
       return agentsCache;
     }
     for (const a of authed) {
@@ -204,7 +206,20 @@ export async function createChatView() {
     }
     // 默认项文字依赖探测回传的 CLI 默认模型，缓存刷新后重同步
     syncAgentModelOptions(conversations.find((c) => c.id === currentId));
+    rerenderOnAgentEmptyFlip(emptyWasVisible);
     return agentsCache;
+  }
+
+  // Agent 引导卡的可见性：引擎为 agent、已至少探测过一次 bridge、且没有可选的已登录 agent。
+  // 探测前（agentsCacheAt=0 且无 agentsError）不显示，防启动瞬间闪卡
+  function agentEmptyVisible() {
+    return currentEngine() === 'agent' && !selectedAgent() && !!(agentsError || agentsCacheAt > 0);
+  }
+
+  // 探测结果决定引导卡去留：可见性翻转才重渲染消息区（避免无谓重置滚动位置），
+  // 流式 / 准备发送期间不动 DOM，等下一次自然渲染
+  function rerenderOnAgentEmptyFlip(wasVisible) {
+    if (agentEmptyVisible() !== wasVisible && !streaming && !preparing) renderMessages();
   }
 
   // 引擎是会话级属性，顶栏不再放切换框（默认本地 Agent 模式）：
@@ -393,6 +408,7 @@ export async function createChatView() {
     if (s === 'ready') {
       clearTimeout(turnLossTimer);
       catchUpAgentTurn();
+      refreshAgents(true); // 重连后下拉与引导卡尽快反映真实状态
       if (warnedDisconnect) {
         warnedDisconnect = false;
         showToast(R.toast, 'bridge 已重连');
@@ -1027,10 +1043,34 @@ export async function createChatView() {
     return card;
   }
 
+  // Agent 引擎无可用 agent 时的引导卡：新会话默认引擎就是 agent，没装 bridge 的
+  // 首启用户缺这张卡时只能靠发送后的 toast 猜原因。bridge 未连 / 已连但没登录两种形态
+  function agentEmptyCardEl() {
+    const connected = !agentsError && agentsCacheAt > 0;
+    const card = document.createElement('div');
+    card.className = 'om-empty-card';
+    const title = document.createElement('div');
+    title.className = 'om-empty-title';
+    title.textContent = connected ? '还没有已登录的 agent' : 'Agent 引擎需要本机 bridge';
+    const desc = document.createElement('div');
+    desc.className = 'om-empty-desc';
+    desc.textContent = connected
+      ? 'bridge 已连接，但未检测到已登录的 Claude Code / Codex。在本机终端完成一次对应 CLI 的登录后回到这里；也可以在设置页配置供应商后，把顶栏引擎切到 LLM。'
+      : 'Agent 引擎经本机 bridge 进程调用已登录的 Claude Code / Codex，不消耗 API Key。两条路任选：在设置页点「启动 bridge」（或双击 bridge 目录的 start.bat）；或在设置页配置任意 OpenAI / Anthropic 兼容供应商后，把顶栏引擎切到 LLM。';
+    const btn = document.createElement('button');
+    btn.id = 'om-empty-agent-settings';
+    btn.className = 'om-empty-btn';
+    btn.textContent = '打开设置';
+    btn.addEventListener('click', openSettings);
+    card.append(title, desc, btn);
+    return card;
+  }
+
   function renderMessages() {
     const conv = conversations.find((c) => c.id === currentId);
     R.column.innerHTML = '';
     if (providersEmpty && currentEngine() === 'llm') R.column.appendChild(emptyCardEl());
+    else if (agentEmptyVisible()) R.column.appendChild(agentEmptyCardEl());
     renderCtxRow();
     if (!conv) return;
     for (const item of conv.items) R.column.appendChild(messageEl(item));

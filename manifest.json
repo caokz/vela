@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Vela",
   "description": "自定义 LLM 供应商的 AI 聊天助手：网页总结、网页翻译、划词就地翻译/代码解释/思维导图、网页图片视频理解、会话自带网页上下文",
-  "version": "0.12.0",
+  "version": "1.0.0",
   "web_accessible_resources": [
     {
       "resources": [

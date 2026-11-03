@@ -8,7 +8,7 @@ import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findChrome } from './lib/chrome.mjs';
+import { findChrome, killTree } from './lib/chrome.mjs';
 
 const EXT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CHROME = findChrome();
@@ -168,7 +168,7 @@ try {
 } catch (e) {
   console.error('FAIL 异常', e.message);
 } finally {
-  chrome.kill();
+  await killTree(chrome);
   await sleep(800);
-  rmSync(profile, { recursive: true, force: true });
+  rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 }
